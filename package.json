@@ -1,0 +1,70 @@
+{
+  "name": "safe-code",
+  "displayName": "Safe Code",
+  "description": "Catch hardcoded secrets before they leave your machine.",
+  "version": "0.0.1",
+  "publisher": "matheus-tecchio",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Linters"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:safeCode.scanOpenFiles"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "safeCode.scanOpenFiles",
+        "title": "Safe Code: Scan Open Files"
+      }
+    ],
+    "configuration": {
+      "title": "Safe Code",
+      "properties": {
+        "safeCode.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable hardcoded secret diagnostics."
+        },
+        "safeCode.minimumSecretLength": {
+          "type": "number",
+          "default": 8,
+          "minimum": 8,
+          "description": "Minimum value length for generic secret assignment warnings."
+        },
+        "safeCode.ignoredPaths": {
+          "type": "array",
+          "default": [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/dist/**",
+            "**/build/**",
+            "**/coverage/**",
+            "**/vendor/**",
+            "**/target/**",
+            "**/.cache/**"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Workspace-relative glob patterns ignored by Safe Code."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.5.3"
+  }
+}
