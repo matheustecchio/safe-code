@@ -18,7 +18,8 @@ This repository contains Safe Code, a VS Code extension that detects suspicious 
 - `src/scanner.ts` filters documents and turns rule matches into findings.
 - `src/rules.ts` defines secret detection regex rules.
 - `src/ignoreStore.ts` stores ignored warnings in VS Code `workspaceState`.
-- `docs/` contains architecture, detection, and development documentation.
+- `docs/` contains the documentation index.
+- `docs/dev/` contains developer-facing architecture, workflow, and detection rule documentation.
 
 ## Commands
 
@@ -38,6 +39,9 @@ Run `npm run compile` before committing TypeScript changes.
 - Do not scan outside the current VS Code workspace.
 - Respect ignored paths such as `node_modules`, `.git`, `dist`, `build`, and `coverage`.
 - Preserve the current MVP behavior unless the task explicitly asks to change it.
+- Update `docs/dev/development.md` when extension architecture, commands, settings, activation flow, diagnostics, quick fixes, scanning behavior, or ignore behavior changes.
+- Update `docs/dev/rules.md` when detection rules, placeholder filtering, rule design guidance, or scanner rule handling changes.
+- Update the root `README.md` when user-facing commands, settings, capabilities, or documentation links change.
 - For documentation-only changes, a compile step is optional unless code or config changed.
 
 ## Commit And Branch Workflow

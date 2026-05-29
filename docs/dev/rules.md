@@ -138,7 +138,8 @@ Values made only of `x`, `*`, `.`, `_`, or `-` are also ignored.
 3. Use a global regex with the `g` flag so `matchAll()` can find every occurrence.
 4. Set `valueGroup` if the diagnostic should underline only part of the full match.
 5. Keep the pattern specific enough to avoid noisy false positives.
-6. Run `npm run compile` after changing rules.
+6. Update this document if rule behavior, filtering, or examples change.
+7. Run `npm run compile` after changing rules.
 
 ## Rule Design Guidelines
 
