@@ -50,9 +50,12 @@ Run `npm run compile` before committing TypeScript changes.
 - Good commit split examples: scaffold, implementation, tests, documentation.
 - Write concise commit messages in imperative mood.
 - Push the feature branch when the work is complete.
+- After pushing, check whether an open PR already exists for the current branch.
+- If no PR exists for the branch, create one against `main`.
+- If an open PR already exists, do not create a duplicate PR; commit and push updates to the same branch so the ongoing PR updates.
 - Do not merge the branch into `main`.
 - Do not create a merge commit unless explicitly requested.
-- The repository owner will open and manage PRs.
+- The repository owner will review and merge PRs.
 
 ## Safety Rules
 
