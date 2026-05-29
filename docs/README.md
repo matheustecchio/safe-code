@@ -6,7 +6,6 @@ This folder contains project documentation for Safe Code.
 
 All developer-facing documentation lives under [`docs/dev/`](./dev/).
 
-- [Developer documentation index](./dev/README.md)
 - [Development guide](./dev/development.md)
 - [Detection rules](./dev/rules.md)
 
