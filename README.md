@@ -31,10 +31,10 @@ Safe Code ignores common placeholder values such as `example`, `sample`, `test`,
 
 ## Documentation
 
-- [Core documentation](./docs/README.md)
-- [How Safe Code works](./docs/how-it-works.md)
-- [Detection rules](./docs/detection-rules.md)
-- [Development guide](./docs/development.md)
+- [Documentation index](./docs/README.md)
+- [Developer documentation](./docs/dev/README.md)
+- [Development guide](./docs/dev/development.md)
+- [Detection rules](./docs/dev/rules.md)
 
 ## Settings
 
@@ -54,10 +54,3 @@ Safe Code ignores common placeholder values such as `example`, `sample`, `test`,
   ]
 }
 ```
-
-## Next milestones
-
-- Add a full workspace scan command.
-- Add severity levels for definite secrets vs suspicious examples.
-- Add project-level ignore configuration.
-- Add a smart fix to move values to `.env` and update `.env.example`.
