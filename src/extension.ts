@@ -1,9 +1,15 @@
 import * as vscode from "vscode";
 import { IgnoreStore } from "./ignoreStore";
+import type { SecretRuleSeverity } from "./rules";
 import { defaultIgnoredPaths, scanDocument, ScannerOptions, shouldScanDocument } from "./scanner";
 
 const diagnosticSource = "Safe Code";
 const ignoreWarningCommand = "safeCode.ignoreWarning";
+const diagnosticSeverityByRuleSeverity: Record<SecretRuleSeverity, vscode.DiagnosticSeverity> = {
+  high: vscode.DiagnosticSeverity.Error,
+  medium: vscode.DiagnosticSeverity.Warning,
+  low: vscode.DiagnosticSeverity.Information
+};
 
 export function activate(context: vscode.ExtensionContext): void {
   const diagnostics = vscode.languages.createDiagnosticCollection("safe-code");
@@ -21,7 +27,11 @@ export function activate(context: vscode.ExtensionContext): void {
     const documentDiagnostics = scanDocument(document, options)
       .filter((finding) => !ignoreStore.isIgnored(document.uri, finding.lineText, finding.ruleId))
       .map((finding) => {
-        const diagnostic = new vscode.Diagnostic(finding.range, finding.message, vscode.DiagnosticSeverity.Warning);
+        const diagnostic = new vscode.Diagnostic(
+          finding.range,
+          finding.message,
+          diagnosticSeverityByRuleSeverity[finding.severity]
+        );
         diagnostic.source = diagnosticSource;
         diagnostic.code = finding.ruleId;
         return diagnostic;
@@ -112,10 +122,10 @@ class SafeCodeActionProvider implements vscode.CodeActionProvider {
   ): vscode.CodeAction[] {
     return context.diagnostics.filter(isSafeCodeDiagnostic).map((diagnostic) => {
       const ruleId = String(diagnostic.code ?? "");
-      const action = new vscode.CodeAction("Safe Code: Ignore this warning", vscode.CodeActionKind.QuickFix);
+      const action = new vscode.CodeAction("Safe Code: Ignore this finding", vscode.CodeActionKind.QuickFix);
       action.command = {
         command: ignoreWarningCommand,
-        title: "Ignore this warning",
+        title: "Ignore this finding",
         arguments: [document.uri, diagnostic.range.start.line, ruleId]
       };
       action.diagnostics = [diagnostic];

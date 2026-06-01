@@ -24,7 +24,7 @@ export type SecretRule = {
 | --- | --- |
 | `id` | Stable identifier used by diagnostics and ignore storage. |
 | `name` | Human-readable rule name. |
-| `severity` | Internal severity used for deduplication and future UI behavior. |
+| `severity` | Internal severity used for deduplication and VS Code diagnostic severity. |
 | `regex` | Pattern used to find suspicious text. |
 | `message` | Diagnostic message shown in VS Code. |
 | `valueGroup` | Optional capture group containing only the secret value. |
@@ -32,16 +32,28 @@ export type SecretRule = {
 
 ## Current Rules
 
-| Rule ID | Detects |
+| Rule ID | Severity | Detects |
+| --- | --- | --- |
+| `private-key` | High | Private key headers such as `-----BEGIN PRIVATE KEY-----`. |
+| `github-token` | High | Classic GitHub token prefixes such as `ghp_`, `gho_`, `ghu_`, `ghs_`, and `ghr_`. |
+| `github-fine-grained-token` | High | Fine-grained GitHub tokens starting with `github_pat_`. |
+| `aws-access-key` | High | AWS access key IDs starting with `AKIA` or `ASIA`. |
+| `stripe-live-key` | High | Stripe live secret keys starting with `sk_live_`. |
+| `database-url` | High | Database URLs containing a username and password. |
+| `generic-secret-assignment` | Medium | Quoted assignments to suspicious variable names such as `apiKey`, `password`, `token`, or `client_secret`. |
+| `env-secret-assignment` | Medium | Unquoted `.env`-style assignments to suspicious names such as `DATABASE_URL=value`. |
+
+## Diagnostic Severity
+
+Safe Code maps each rule's internal severity to a VS Code diagnostic severity in `src/extension.ts`:
+
+| Rule severity | VS Code diagnostic severity |
 | --- | --- |
-| `private-key` | Private key headers such as `-----BEGIN PRIVATE KEY-----`. |
-| `github-token` | Classic GitHub token prefixes such as `ghp_`, `gho_`, `ghu_`, `ghs_`, and `ghr_`. |
-| `github-fine-grained-token` | Fine-grained GitHub tokens starting with `github_pat_`. |
-| `aws-access-key` | AWS access key IDs starting with `AKIA` or `ASIA`. |
-| `stripe-live-key` | Stripe live secret keys starting with `sk_live_`. |
-| `database-url` | Database URLs containing a username and password. |
-| `generic-secret-assignment` | Quoted assignments to suspicious variable names such as `apiKey`, `password`, `token`, or `client_secret`. |
-| `env-secret-assignment` | Unquoted `.env`-style assignments to suspicious names such as `DATABASE_URL=value`. |
+| `high` | Error |
+| `medium` | Warning |
+| `low` | Information |
+
+Use `high` for high-confidence or high-impact findings such as private keys, cloud credentials, live payment keys, and database URLs with credentials. Use `medium` for generic secret assignments. Reserve `low` for low-confidence or example-like findings when those rules are added.
 
 ## Generic Assignment Detection
 
@@ -137,9 +149,10 @@ Values made only of `x`, `*`, `.`, `_`, or `-` are also ignored.
 2. Use a stable `id` because ignore storage depends on it.
 3. Use a global regex with the `g` flag so `matchAll()` can find every occurrence.
 4. Set `valueGroup` if the diagnostic should underline only part of the full match.
-5. Keep the pattern specific enough to avoid noisy false positives.
-6. Update this document if rule behavior, filtering, or examples change.
-7. Run `npm run compile` after changing rules.
+5. Set `severity` according to the centralized diagnostic severity mapping.
+6. Keep the pattern specific enough to avoid noisy false positives.
+7. Update this document if rule behavior, filtering, or examples change.
+8. Run `npm run compile` after changing rules.
 
 ## Rule Design Guidelines
 

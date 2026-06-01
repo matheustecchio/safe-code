@@ -2,7 +2,7 @@
 
 This guide covers the local development workflow and core architecture for Safe Code.
 
-Safe Code is a VS Code extension that scans open workspace files for suspicious hardcoded secrets. When it finds one, it creates a VS Code diagnostic so the editor shows a yellow underline and the Problems tab shows a warning.
+Safe Code is a VS Code extension that scans open workspace files for suspicious hardcoded secrets. When it finds one, it creates a VS Code diagnostic so the editor highlights the value and the Problems tab shows the finding.
 
 ## Requirements
 
@@ -86,7 +86,7 @@ safe-code/
 5. When a supported file opens or changes, Safe Code queues a scan with a short debounce.
 6. The scanner checks whether the document should be scanned.
 7. The scanner applies each rule from `src/rules.ts` to the document text.
-8. Findings that are not ignored are converted into VS Code diagnostics.
+8. Findings that are not ignored are converted into VS Code diagnostics using their internal rule severity.
 9. Diagnostics are stored in the diagnostic collection and shown by VS Code.
 
 ## Activation
@@ -107,7 +107,7 @@ The activation function is `activate(context)` in `src/extension.ts`.
 - `onDidCloseTextDocument` removes diagnostics for the closed file.
 - `onDidChangeActiveTextEditor` queues a scan when the active editor changes.
 - `onDidChangeConfiguration` rescans open files when `safeCode` settings change.
-- `registerCodeActionsProvider` provides the `Safe Code: Ignore this warning` quick fix.
+- `registerCodeActionsProvider` provides the `Safe Code: Ignore this finding` quick fix.
 - `safeCode.ignoreWarning` stores a local ignore entry and rescans the document.
 - `safeCode.scanOpenFiles` rescans open workspace files.
 
@@ -156,11 +156,15 @@ Detection rule details live in [Detection Rules](./rules.md).
 
 Each diagnostic uses:
 
-- `vscode.DiagnosticSeverity.Warning` for the MVP.
+- `vscode.DiagnosticSeverity.Error` for high-severity rules.
+- `vscode.DiagnosticSeverity.Warning` for medium-severity rules.
+- `vscode.DiagnosticSeverity.Information` for low-severity rules.
 - `source = "Safe Code"` so quick fixes can identify Safe Code diagnostics.
-- `code = finding.ruleId` so ignores know which rule created the warning.
+- `code = finding.ruleId` so ignores know which rule created the diagnostic.
 - `range = finding.range` so VS Code underlines the suspicious value.
-- `message = finding.message` so the Problems tab shows the warning text.
+- `message = finding.message` so the Problems tab shows the finding text.
+
+The mapping from internal rule severity to VS Code diagnostic severity is centralized in `src/extension.ts`. Rule authors only set `severity` on the rule definition.
 
 The diagnostics are stored with `diagnostics.set(document.uri, documentDiagnostics)`.
 
@@ -171,10 +175,10 @@ The quick fix is implemented by `SafeCodeActionProvider` in `src/extension.ts`.
 When VS Code asks for code actions, the provider:
 
 1. Filters diagnostics to only those with `source === "Safe Code"`.
-2. Creates a `CodeAction` titled `Safe Code: Ignore this warning`.
+2. Creates a `CodeAction` titled `Safe Code: Ignore this finding`.
 3. Calls the internal command `safeCode.ignoreWarning` with the file URI, diagnostic line, and rule ID.
 
-The command opens the document, reads the current line text, stores the ignore entry, and rescans the document. The warning disappears if the stored ignore matches the new scan result.
+The command opens the document, reads the current line text, stores the ignore entry, and rescans the document. The diagnostic disappears if the stored ignore matches the new scan result.
 
 ## Ignore Storage
 
@@ -212,25 +216,25 @@ Current settings are:
 
 Create or open a supported file inside the workspace and try these examples.
 
-This should warn:
+This should produce an error:
 
 ```ts
 const apiKey = "sk_live_123456789abcdef";
 ```
 
-This should warn:
+This should produce an error:
 
 ```dotenv
 DATABASE_URL=postgres://user:pass@example.com/app
 ```
 
-This should warn:
+This should produce an error:
 
 ```text
 -----BEGIN PRIVATE KEY-----
 ```
 
-This should not warn because it is a placeholder:
+This should not produce a diagnostic because it is a placeholder:
 
 ```ts
 const exampleApiKey = "your-api-key-here";
@@ -252,7 +256,6 @@ To change ignore behavior, edit `src/ignoreStore.ts`.
 
 ## MVP Limitations
 
-- All diagnostics use Warning severity, even though rules already store `low`, `medium`, and `high` internally.
 - The scan command currently scans open workspace files, not the whole workspace.
 - Ignores are local only and are not shared with a team.
 - Changing the line text changes the line hash, so the old ignore no longer applies.
