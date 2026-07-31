@@ -9,6 +9,8 @@ All developer-facing documentation lives under [`docs/dev/`](./dev/).
 - [Development guide](./dev/development.md)
 - [Detection rules](./dev/rules.md)
 
+Release instructions for maintainers are documented in the [Release Workflow](./dev/development.md#release-workflow).
+
 ## Current MVP Scope
 
 Safe Code currently scans supported files that are open in the current VS Code workspace. It creates warning diagnostics for suspicious hardcoded secrets and lets the user ignore a specific warning locally.
