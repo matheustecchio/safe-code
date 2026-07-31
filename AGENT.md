@@ -27,6 +27,8 @@ This repository contains Safe Code, a VS Code extension that detects suspicious 
 - Compile: `npm run compile`
 - Watch TypeScript: `npm run watch`
 - Local VS Code test from the repository root: `code --extensionDevelopmentPath="$(pwd)"`
+- Package extension: `vsce package --no-dependencies`
+- Publish extension: `vsce publish --no-dependencies`
 
 Run `npm run compile` before committing TypeScript changes.
 
@@ -60,6 +62,25 @@ Run `npm run compile` before committing TypeScript changes.
 - Do not merge the branch into `main`.
 - Do not create a merge commit unless explicitly requested.
 - The repository owner will review and merge PRs.
+
+## Extension Release Workflow
+
+When a user asks for a new release of the VS Code extension:
+
+- Create a release or feature branch before making commits.
+- Implement the requested features, fixes, or release prep.
+- Run `npm install` only when dependencies changed or `node_modules` is missing.
+- Run `npm run compile`.
+- Bump the extension version with one of:
+  - `npm version patch` for fixes, docs, or internal changes.
+  - `npm version minor` for new user-facing features.
+  - `npm version major` only for breaking behavior.
+- Run `vsce package --no-dependencies`.
+- Run `vsce publish --no-dependencies` only when the user explicitly asks to publish and valid Visual Studio Marketplace authentication is available.
+- Commit the release changes, push the branch, and create or update a PR against `main`.
+- Do not merge the PR.
+
+Use `--no-dependencies` for `vsce` commands because Safe Code currently has no runtime npm dependencies and this avoids local `vsce` dependency detection issues.
 
 ## Safety Rules
 

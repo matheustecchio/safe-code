@@ -51,7 +51,6 @@ safe-code/
 ├── docs/
 │   ├── README.md
 │   └── dev/
-│       ├── README.md
 │       ├── development.md
 │       └── rules.md
 ├── src/
@@ -249,6 +248,56 @@ To change diagnostics behavior, edit `scanNow(document)` in `src/extension.ts`.
 To change quick fixes, edit `SafeCodeActionProvider` in `src/extension.ts`.
 
 To change ignore behavior, edit `src/ignoreStore.ts`.
+
+## Release Workflow
+
+Use this workflow when preparing a new Safe Code Marketplace release from `main`.
+
+1. Create a release or feature branch. Do not commit directly to `main`.
+2. Implement the requested features, fixes, or release prep.
+3. Install dependencies only when needed:
+
+```bash
+npm install
+```
+
+4. Compile the extension:
+
+```bash
+npm run compile
+```
+
+5. Bump the extension version:
+
+```bash
+npm version patch
+```
+
+Use `patch` for fixes, docs, or internal changes; `minor` for new user-facing features; and `major` only for breaking behavior.
+
+6. Package the extension:
+
+```bash
+vsce package --no-dependencies
+```
+
+7. Publish only when you intentionally want to release to the Marketplace and valid publisher authentication is available:
+
+```bash
+vsce publish --no-dependencies
+```
+
+One-time publisher login uses:
+
+```bash
+vsce login matheus-tecchio
+```
+
+Marketplace versions are immutable. If `0.0.1` has already been published, the next release must use a new version such as `0.0.2`.
+
+After packaging or publishing, commit the release changes, push the branch, and open a PR against `main`. Do not merge the PR directly.
+
+Safe Code currently has no runtime npm dependencies, so release commands use `--no-dependencies` to avoid local `vsce` dependency detection issues.
 
 ## MVP Limitations
 
