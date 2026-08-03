@@ -5,6 +5,17 @@
   "version": "0.0.1",
   "publisher": "matheus-tecchio",
   "license": "MIT",
+  "icon": "icon.png",
+  "files": [
+    "out/**",
+    "icon.png",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matheustecchio/safe-code.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
