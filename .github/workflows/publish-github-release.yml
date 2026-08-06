@@ -1,0 +1,86 @@
+name: Publish GitHub release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-github-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Package and publish GitHub release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate release metadata
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          version="$(node -p "require('./package.json').version")"
+          extension_id="$(node -p "require('./package.json').publisher + '.' + require('./package.json').name")"
+          tag="v${version}"
+
+          if git rev-parse --verify --quiet "refs/tags/${tag}"; then
+            echo "Tag ${tag} already exists; refusing to overwrite an existing release." >&2
+            exit 1
+          fi
+
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "GitHub Release ${tag} already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+
+          marketplace_json="$(npx --yes @vscode/vsce@latest show "${extension_id}" --json)"
+          if ! jq -e --arg version "${version}" '.versions[] | select(.version == $version)' <<<"${marketplace_json}" >/dev/null; then
+            echo "Marketplace version ${version} was not found for ${extension_id}." >&2
+            exit 1
+          fi
+
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >>"${GITHUB_OUTPUT}"
+
+      - name: Compile extension
+        run: npm run compile
+
+      - name: Package VSIX
+        run: >-
+          npx --yes @vscode/vsce@latest package --no-dependencies
+          --out "${{ runner.temp }}/safe-code-${{ steps.release.outputs.version }}.vsix"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VSIX: ${{ runner.temp }}/safe-code-${{ steps.release.outputs.version }}.vsix
+        run: |
+          set -euo pipefail
+
+          gh release create "${TAG}" "${VSIX}#safe-code-${VERSION}.vsix" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "$(git rev-parse HEAD)" \
+            --title "Safe Code ${VERSION}" \
+            --generate-notes \
+            --latest

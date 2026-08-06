@@ -281,7 +281,9 @@ Use `patch` for fixes, docs, or internal changes; `minor` for new user-facing fe
 vsce package --no-dependencies
 ```
 
-7. Publish only when you intentionally want to release to the Marketplace and valid publisher authentication is available:
+7. Commit the release changes, push the branch, open a PR against `main`, and wait for the repository owner to merge it.
+
+8. Update a clean local `main`, then publish only when you intentionally want to release to the Marketplace and valid publisher authentication is available:
 
 ```bash
 vsce publish --no-dependencies
@@ -293,9 +295,15 @@ One-time publisher login uses:
 vsce login matheus-tecchio
 ```
 
-Marketplace versions are immutable. If `0.0.1` has already been published, the next release must use a new version such as `0.0.2`.
+9. After the Marketplace publish succeeds, run the `Publish GitHub release` workflow from the Actions tab or with GitHub CLI:
 
-After packaging or publishing, commit the release changes, push the branch, and open a PR against `main`. Do not merge the PR directly.
+```bash
+gh workflow run "Publish GitHub release" --ref main
+```
+
+The workflow verifies that the version in `package.json` exists on the Marketplace, compiles and packages the extension, creates the matching `v<version>` tag and GitHub Release, generates release notes, and attaches the VSIX. It refuses to overwrite an existing tag or release.
+
+Marketplace versions are immutable. If a version has already been published, the next release must use a new version.
 
 Safe Code currently has no runtime npm dependencies, so release commands use `--no-dependencies` to avoid local `vsce` dependency detection issues.
 
