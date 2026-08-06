@@ -32,7 +32,6 @@ Safe Code ignores common placeholder values such as `example`, `sample`, `test`,
 ## Documentation
 
 - [Documentation index](./docs/README.md)
-- [Developer documentation](./docs/dev/README.md)
 - [Development guide](./docs/dev/development.md)
 - [Detection rules](./docs/dev/rules.md)
 
