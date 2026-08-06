@@ -76,9 +76,17 @@ When a user asks for a new release of the VS Code extension:
   - `npm version minor` for new user-facing features.
   - `npm version major` only for breaking behavior.
 - Run `vsce package --no-dependencies`.
-- Run `vsce publish --no-dependencies` only when the user explicitly asks to publish and valid Visual Studio Marketplace authentication is available.
 - Commit the release changes, push the branch, and create or update a PR against `main`.
 - Do not merge the PR.
+- Wait for the repository owner to review and merge the release PR, then update a clean local `main` before publishing.
+- Run `vsce publish --no-dependencies` only when the user explicitly asks to publish and valid Visual Studio Marketplace authentication is available.
+- After a successful Marketplace publication, create a matching GitHub Release:
+  - Tag the merged release commit as `v<version>`, matching the version in `package.json`.
+  - Title the release `Safe Code <version>`.
+  - Add concise user-facing release notes.
+  - Attach the packaged `safe-code-<version>.vsix` file.
+  - Mark the GitHub Release as a prerelease only when the corresponding extension version is not a stable Marketplace release.
+- Verify that the Marketplace version and GitHub Release version match and that the VSIX asset is downloadable.
 
 Use `--no-dependencies` for `vsce` commands because Safe Code currently has no runtime npm dependencies and this avoids local `vsce` dependency detection issues.
 
