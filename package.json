@@ -2,7 +2,7 @@
   "name": "safe-code",
   "displayName": "Safe Code",
   "description": "Catch hardcoded secrets before they leave your machine.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "matheus-tecchio",
   "license": "MIT",
   "icon": "icon.png",
@@ -71,11 +71,20 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "compile:tests": "tsc -p ./tsconfig.test.json",
+    "compile:all": "npm run compile && npm run compile:tests",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "npm run compile:tests && mocha --ui tdd --timeout 5000 \".test-out/test/unit/**/*.test.js\"",
+    "test:integration": "npm run compile:all && vscode-test --label integration"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.10",
     "@types/node": "^20.14.10",
     "@types/vscode": "^1.90.0",
+    "@vscode/test-cli": "0.0.12",
+    "@vscode/test-electron": "2.5.2",
+    "mocha": "^11.8.0",
     "typescript": "^5.5.3"
   }
 }

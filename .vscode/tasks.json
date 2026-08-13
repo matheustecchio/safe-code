@@ -7,6 +7,13 @@
       "script": "compile",
       "group": "build",
       "problemMatcher": "$tsc"
+    },
+    {
+      "label": "npm: compile:all",
+      "type": "npm",
+      "script": "compile:all",
+      "group": "test",
+      "problemMatcher": "$tsc"
     }
   ]
 }

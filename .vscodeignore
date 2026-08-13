@@ -1,7 +1,14 @@
 .gitignore
+.github/**
 .vscode/**
 .vscode-test/**
+.vscode-test.js
+.test-out/**
+AGENT.md
+docs/**
+test/**
 node_modules/**
 src/**
 tsconfig.json
-*.map
+tsconfig.test.json
+**/*.map
