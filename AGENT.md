@@ -30,7 +30,7 @@ This repository contains Safe Code, a VS Code extension that detects suspicious 
 - Package extension: `vsce package --no-dependencies`
 - Publish extension: `vsce publish --no-dependencies`
 
-Run `npm run compile` before committing TypeScript changes.
+Run `npm test` before committing TypeScript, configuration, or test changes. This command includes the production compile, unit tests, and VS Code integration tests. For documentation-only changes, running the test suite is optional.
 
 ## Development Guidelines
 
