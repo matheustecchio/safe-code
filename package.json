@@ -41,6 +41,11 @@
           "default": true,
           "description": "Enable hardcoded secret diagnostics."
         },
+        "safeCode.scanWorkspaceOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically scan supported files across the workspace when Safe Code starts."
+        },
         "safeCode.minimumSecretLength": {
           "type": "number",
           "default": 8,

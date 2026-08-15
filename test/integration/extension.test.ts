@@ -37,6 +37,7 @@ suite("Safe Code extension", () => {
   setup(async () => {
     const configuration = vscode.workspace.getConfiguration("safeCode");
     await configuration.update("enabled", true, vscode.ConfigurationTarget.Global);
+    await configuration.update("scanWorkspaceOnStartup", false, vscode.ConfigurationTarget.Global);
     await configuration.update("minimumSecretLength", 8, vscode.ConfigurationTarget.Global);
     await configuration.update("ignoredPaths", defaultIgnoredPaths, vscode.ConfigurationTarget.Global);
   });
@@ -52,6 +53,7 @@ suite("Safe Code extension", () => {
   suiteTeardown(async () => {
     const configuration = vscode.workspace.getConfiguration("safeCode");
     await configuration.update("enabled", undefined, vscode.ConfigurationTarget.Global);
+    await configuration.update("scanWorkspaceOnStartup", undefined, vscode.ConfigurationTarget.Global);
     await configuration.update("minimumSecretLength", undefined, vscode.ConfigurationTarget.Global);
     await configuration.update("ignoredPaths", undefined, vscode.ConfigurationTarget.Global);
     await vscode.workspace.fs.delete(runtimeDirectory, { recursive: true, useTrash: false });
@@ -83,6 +85,19 @@ suite("Safe Code extension", () => {
     await vscode.workspace.fs.delete(uri, { useTrash: false });
     createdWorkspaceFiles = createdWorkspaceFiles.filter((candidate) => candidate.toString() !== uri.toString());
     await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 0);
+  });
+
+  test("automatically scans workspace files when startup scanning is enabled", async () => {
+    const configuration = vscode.workspace.getConfiguration("safeCode");
+    await configuration.update("enabled", false, vscode.ConfigurationTarget.Global);
+    const uri = await createWorkspaceFile("startup.ts", 'const apiKey = "startup-secret-value";');
+    assert.deepStrictEqual(getSafeCodeDiagnostics(uri), []);
+
+    await configuration.update("scanWorkspaceOnStartup", true, vscode.ConfigurationTarget.Global);
+    await configuration.update("enabled", true, vscode.ConfigurationTarget.Global);
+
+    const diagnostics = await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+    assert.strictEqual(diagnostics[0].code, "generic-secret-assignment");
   });
 
   test("registers the workspace command and diagnoses an unopened file", async () => {

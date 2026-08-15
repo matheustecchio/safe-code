@@ -121,19 +121,25 @@ export function activate(context: vscode.ExtensionContext): void {
     diagnosticUris.clear();
   };
 
-  const scanWorkspace = async (): Promise<void> => {
+  const scanWorkspace = async (interactive: boolean): Promise<void> => {
     if (!vscode.workspace.workspaceFolders?.length) {
-      void vscode.window.showWarningMessage("Safe Code needs an open folder or workspace to scan.");
+      if (interactive) {
+        void vscode.window.showWarningMessage("Safe Code needs an open folder or workspace to scan.");
+      }
       return;
     }
 
     if (!isEnabled()) {
-      void vscode.window.showInformationMessage("Safe Code is disabled in settings.");
+      if (interactive) {
+        void vscode.window.showInformationMessage("Safe Code is disabled in settings.");
+      }
       return;
     }
 
     if (workspaceScanInProgress) {
-      void vscode.window.showInformationMessage("A Safe Code workspace scan is already running.");
+      if (interactive) {
+        void vscode.window.showInformationMessage("A Safe Code workspace scan is already running.");
+      }
       return;
     }
 
@@ -141,9 +147,9 @@ export function activate(context: vscode.ExtensionContext): void {
     try {
       const result = await vscode.window.withProgress(
         {
-          location: vscode.ProgressLocation.Notification,
+          location: interactive ? vscode.ProgressLocation.Notification : vscode.ProgressLocation.Window,
           title: "Safe Code: Scanning workspace",
-          cancellable: true
+          cancellable: interactive
         },
         async (progress, token): Promise<WorkspaceScanResult> => {
           const options = getScannerOptions();
@@ -208,16 +214,20 @@ export function activate(context: vscode.ExtensionContext): void {
       );
 
       if (result.cancelled) {
-        void vscode.window.showInformationMessage(
-          `Safe Code workspace scan cancelled after ${result.scannedFiles} files. Processed results were kept.`
-        );
+        if (interactive) {
+          void vscode.window.showInformationMessage(
+            `Safe Code workspace scan cancelled after ${result.scannedFiles} files. Processed results were kept.`
+          );
+        }
         return;
       }
 
-      const failureSuffix = result.failedFiles > 0 ? ` ${result.failedFiles} files could not be read.` : "";
-      void vscode.window.showInformationMessage(
-        `Safe Code scanned ${result.scannedFiles} files and found ${result.findings} warnings.${failureSuffix}`
-      );
+      if (interactive) {
+        const failureSuffix = result.failedFiles > 0 ? ` ${result.failedFiles} files could not be read.` : "";
+        void vscode.window.showInformationMessage(
+          `Safe Code scanned ${result.scannedFiles} files and found ${result.findings} warnings.${failureSuffix}`
+        );
+      }
     } catch (error) {
       void vscode.window.showErrorMessage(`Safe Code workspace scan failed: ${String(error)}`);
     } finally {
@@ -251,7 +261,11 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       clearTrackedDiagnostics();
-      scanOpenDocuments();
+      if (shouldScanWorkspaceOnStartup()) {
+        void scanWorkspace(false);
+      } else {
+        scanOpenDocuments();
+      }
     }),
     vscode.languages.registerCodeActionsProvider(
       { scheme: "file" },
@@ -271,10 +285,14 @@ export function activate(context: vscode.ExtensionContext): void {
       scanOpenDocuments();
       vscode.window.showInformationMessage("Safe Code scanned open workspace files.");
     }),
-    vscode.commands.registerCommand(scanWorkspaceCommand, scanWorkspace)
+    vscode.commands.registerCommand(scanWorkspaceCommand, () => scanWorkspace(true))
   );
 
-  scanOpenDocuments();
+  if (shouldScanWorkspaceOnStartup()) {
+    void scanWorkspace(false);
+  } else {
+    scanOpenDocuments();
+  }
 }
 
 export function deactivate(): void {
@@ -310,6 +328,10 @@ function isSafeCodeDiagnostic(diagnostic: vscode.Diagnostic): boolean {
 
 function isEnabled(): boolean {
   return vscode.workspace.getConfiguration("safeCode").get("enabled", true);
+}
+
+function shouldScanWorkspaceOnStartup(): boolean {
+  return vscode.workspace.getConfiguration("safeCode").get("scanWorkspaceOnStartup", true);
 }
 
 function getScannerOptions(): ScannerOptions {
