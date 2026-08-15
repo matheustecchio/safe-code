@@ -6,7 +6,7 @@ Safe Code is a lightweight VS Code extension that detects possible hardcoded sec
 
 ## MVP features
 
-- Scans supported files when they are opened or changed, with a manual command for scanning the full workspace.
+- Automatically scans supported files across the workspace when Safe Code starts and keeps them updated as files change.
 - Adds VS Code diagnostics so matches appear as yellow warning underlines and in the Problems tab.
 - Provides a quick fix: `Safe Code: Ignore this warning`.
 - Stores ignored warnings locally in VS Code workspace storage using `file path + line hash + rule id`.
@@ -30,6 +30,8 @@ Safe Code ignores common placeholder values such as `example`, `sample`, `test`,
 - `Safe Code: Scan Open Files` rescans currently open workspace files.
 - `Safe Code: Scan Workspace` scans every supported file in the current workspace and reports findings from both open and unopened files in the Problems tab. The scan shows cancellable progress and keeps results that were processed before cancellation.
 
+`Safe Code: Scan Workspace` is also available by right-clicking an editor tab or a file in the Explorer.
+
 ## Documentation
 
 - [Documentation index](./docs/README.md)
@@ -41,6 +43,7 @@ Safe Code ignores common placeholder values such as `example`, `sample`, `test`,
 ```json
 {
   "safeCode.enabled": true,
+  "safeCode.scanWorkspaceOnStartup": true,
   "safeCode.minimumSecretLength": 8,
   "safeCode.ignoredPaths": [
     "**/node_modules/**",
@@ -56,3 +59,5 @@ Safe Code ignores common placeholder values such as `example`, `sample`, `test`,
 ```
 
 The built-in dependency, build, and cache exclusions are always enforced. Add workspace-relative glob patterns to `safeCode.ignoredPaths` for project-specific generated files or directories.
+
+Set `safeCode.scanWorkspaceOnStartup` to `false` if you prefer to run full workspace scans manually. Supported files that are created or changed while VS Code is open are still scanned automatically, and their Problems entries remain visible after their editor tabs close.

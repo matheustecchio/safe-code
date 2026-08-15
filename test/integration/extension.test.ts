@@ -37,6 +37,7 @@ suite("Safe Code extension", () => {
   setup(async () => {
     const configuration = vscode.workspace.getConfiguration("safeCode");
     await configuration.update("enabled", true, vscode.ConfigurationTarget.Global);
+    await configuration.update("scanWorkspaceOnStartup", false, vscode.ConfigurationTarget.Global);
     await configuration.update("minimumSecretLength", 8, vscode.ConfigurationTarget.Global);
     await configuration.update("ignoredPaths", defaultIgnoredPaths, vscode.ConfigurationTarget.Global);
   });
@@ -52,6 +53,7 @@ suite("Safe Code extension", () => {
   suiteTeardown(async () => {
     const configuration = vscode.workspace.getConfiguration("safeCode");
     await configuration.update("enabled", undefined, vscode.ConfigurationTarget.Global);
+    await configuration.update("scanWorkspaceOnStartup", undefined, vscode.ConfigurationTarget.Global);
     await configuration.update("minimumSecretLength", undefined, vscode.ConfigurationTarget.Global);
     await configuration.update("ignoredPaths", undefined, vscode.ConfigurationTarget.Global);
     await vscode.workspace.fs.delete(runtimeDirectory, { recursive: true, useTrash: false });
@@ -65,11 +67,50 @@ suite("Safe Code extension", () => {
     const diagnostics = await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
     assert.strictEqual(diagnostics[0].source, "Safe Code");
     assert.strictEqual(diagnostics[0].code, "generic-secret-assignment");
+
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    assert.strictEqual(getSafeCodeDiagnostics(uri).length, 1);
+  });
+
+  test("automatically maintains diagnostics for workspace file changes", async () => {
+    const uri = await createWorkspaceFile("watched.ts", 'const apiKey = "watched-secret-value";');
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+
+    await vscode.workspace.fs.writeFile(uri, Buffer.from("export const clean = true;"));
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 0);
+
+    await vscode.workspace.fs.writeFile(uri, Buffer.from('const token = "watched-secret-again";'));
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+
+    await vscode.workspace.fs.delete(uri, { useTrash: false });
+    createdWorkspaceFiles = createdWorkspaceFiles.filter((candidate) => candidate.toString() !== uri.toString());
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 0);
+  });
+
+  test("automatically scans workspace files when startup scanning is enabled", async () => {
+    const configuration = vscode.workspace.getConfiguration("safeCode");
+    await configuration.update("enabled", false, vscode.ConfigurationTarget.Global);
+    const uri = await createWorkspaceFile("startup.ts", 'const apiKey = "startup-secret-value";');
+    assert.deepStrictEqual(getSafeCodeDiagnostics(uri), []);
+
+    await configuration.update("scanWorkspaceOnStartup", true, vscode.ConfigurationTarget.Global);
+    await configuration.update("enabled", true, vscode.ConfigurationTarget.Global);
+
+    const diagnostics = await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+    assert.strictEqual(diagnostics[0].code, "generic-secret-assignment");
   });
 
   test("registers the workspace command and diagnoses an unopened file", async () => {
     const commands = await vscode.commands.getCommands(true);
     assert.ok(commands.includes("safeCode.scanWorkspace"));
+
+    const extension = vscode.extensions.getExtension(extensionId);
+    const menus = extension?.packageJSON.contributes?.menus;
+    assert.ok(
+      menus?.["editor/title/context"]?.some(
+        (item: { command?: string }) => item.command === "safeCode.scanWorkspace"
+      )
+    );
 
     const uri = await createWorkspaceFile("unopened.ts", 'const apiKey = "workspace-secret-value";');
     assert.strictEqual(vscode.workspace.textDocuments.some((document) => document.uri.toString() === uri.toString()), false);
