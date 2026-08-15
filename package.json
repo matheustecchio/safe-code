@@ -2,7 +2,7 @@
   "name": "safe-code",
   "displayName": "Safe Code",
   "description": "Catch hardcoded secrets before they leave your machine.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "matheus-tecchio",
   "license": "MIT",
   "icon": "icon.png",
@@ -18,7 +18,8 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "onCommand:safeCode.scanOpenFiles"
+    "onCommand:safeCode.scanOpenFiles",
+    "onCommand:safeCode.scanWorkspace"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -26,6 +27,10 @@
       {
         "command": "safeCode.scanOpenFiles",
         "title": "Safe Code: Scan Open Files"
+      },
+      {
+        "command": "safeCode.scanWorkspace",
+        "title": "Safe Code: Scan Workspace"
       }
     ],
     "configuration": {

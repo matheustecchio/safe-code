@@ -20,16 +20,20 @@ export type SecretFinding = {
 };
 
 export function shouldScanDocument(document: vscode.TextDocument, options: ScannerOptions): boolean {
-  if (document.uri.scheme !== "file") {
+  return shouldScanUri(document.uri, options);
+}
+
+export function shouldScanUri(uri: vscode.Uri, options: ScannerOptions): boolean {
+  if (uri.scheme !== "file") {
     return false;
   }
 
-  if (!vscode.workspace.getWorkspaceFolder(document.uri)) {
+  if (!vscode.workspace.getWorkspaceFolder(uri)) {
     return false;
   }
 
-  const relativePath = vscode.workspace.asRelativePath(document.uri, false).replace(/\\/g, "/");
-  return shouldScanFile(document.fileName, relativePath, options.ignoredPaths);
+  const relativePath = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, "/");
+  return shouldScanFile(uri.fsPath, relativePath, options.ignoredPaths);
 }
 
 export function scanDocument(document: vscode.TextDocument, options: ScannerOptions): SecretFinding[] {

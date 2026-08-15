@@ -1,21 +1,32 @@
 import * as vscode from "vscode";
 import { IgnoreStore } from "./ignoreStore";
-import { defaultIgnoredPaths, scanDocument, ScannerOptions, shouldScanDocument } from "./scanner";
+import { defaultIgnoredPaths, scanDocument, ScannerOptions, shouldScanDocument, shouldScanUri } from "./scanner";
 
 const diagnosticSource = "Safe Code";
 const ignoreWarningCommand = "safeCode.ignoreWarning";
+const scanWorkspaceCommand = "safeCode.scanWorkspace";
+
+type WorkspaceScanResult = {
+  cancelled: boolean;
+  failedFiles: number;
+  findings: number;
+  scannedFiles: number;
+};
 
 export function activate(context: vscode.ExtensionContext): void {
   const diagnostics = vscode.languages.createDiagnosticCollection("safe-code");
   const ignoreStore = new IgnoreStore(context.workspaceState);
   const pendingScans = new Map<string, ReturnType<typeof setTimeout>>();
+  const workspaceDiagnosticUris = new Map<string, vscode.Uri>();
+  let workspaceScanInProgress = false;
 
-  const scanNow = (document: vscode.TextDocument): void => {
-    const options = getScannerOptions();
+  const scanNow = (document: vscode.TextDocument, options = getScannerOptions()): number => {
+    const key = document.uri.toString();
 
     if (!isEnabled() || !shouldScanDocument(document, options)) {
       diagnostics.delete(document.uri);
-      return;
+      workspaceDiagnosticUris.delete(key);
+      return 0;
     }
 
     const documentDiagnostics = scanDocument(document, options)
@@ -28,6 +39,11 @@ export function activate(context: vscode.ExtensionContext): void {
       });
 
     diagnostics.set(document.uri, documentDiagnostics);
+    if (documentDiagnostics.length === 0) {
+      workspaceDiagnosticUris.delete(key);
+    }
+
+    return documentDiagnostics.length;
   };
 
   const queueScan = (document: vscode.TextDocument): void => {
@@ -53,11 +69,127 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  const clearWorkspaceDiagnostics = (): void => {
+    for (const uri of workspaceDiagnosticUris.values()) {
+      diagnostics.delete(uri);
+    }
+    workspaceDiagnosticUris.clear();
+  };
+
+  const scanWorkspace = async (): Promise<void> => {
+    if (!vscode.workspace.workspaceFolders?.length) {
+      void vscode.window.showWarningMessage("Safe Code needs an open folder or workspace to scan.");
+      return;
+    }
+
+    if (!isEnabled()) {
+      void vscode.window.showInformationMessage("Safe Code is disabled in settings.");
+      return;
+    }
+
+    if (workspaceScanInProgress) {
+      void vscode.window.showInformationMessage("A Safe Code workspace scan is already running.");
+      return;
+    }
+
+    workspaceScanInProgress = true;
+    try {
+      const result = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "Safe Code: Scanning workspace",
+          cancellable: true
+        },
+        async (progress, token): Promise<WorkspaceScanResult> => {
+          const options = getScannerOptions();
+          const previousDiagnosticUris = new Map(workspaceDiagnosticUris);
+          const currentDiagnosticKeys = new Set<string>();
+          let discoveredUris: vscode.Uri[];
+          try {
+            discoveredUris = await vscode.workspace.findFiles(
+              "**/*",
+              createExcludeGlob(options.ignoredPaths),
+              undefined,
+              token
+            );
+          } catch (error) {
+            if (token.isCancellationRequested) {
+              return { cancelled: true, failedFiles: 0, findings: 0, scannedFiles: 0 };
+            }
+            throw error;
+          }
+          const candidateUris = discoveredUris.filter((uri) => shouldScanUri(uri, options));
+          let failedFiles = 0;
+          let findings = 0;
+          let scannedFiles = 0;
+
+          for (const uri of candidateUris) {
+            if (token.isCancellationRequested) {
+              break;
+            }
+
+            try {
+              const document = await vscode.workspace.openTextDocument(uri);
+              const fileFindings = scanNow(document, options);
+              const key = uri.toString();
+              findings += fileFindings;
+              if (fileFindings > 0) {
+                workspaceDiagnosticUris.set(key, uri);
+                currentDiagnosticKeys.add(key);
+              }
+            } catch (error) {
+              failedFiles += 1;
+              console.warn(`Safe Code could not scan ${uri.fsPath}: ${String(error)}`);
+            }
+
+            scannedFiles += 1;
+            progress.report({
+              message: `${scannedFiles} of ${candidateUris.length} files`,
+              increment: candidateUris.length > 0 ? 100 / candidateUris.length : undefined
+            });
+          }
+
+          const cancelled = token.isCancellationRequested;
+          if (!cancelled) {
+            for (const [key, uri] of previousDiagnosticUris) {
+              if (!currentDiagnosticKeys.has(key)) {
+                diagnostics.delete(uri);
+                workspaceDiagnosticUris.delete(key);
+              }
+            }
+          }
+
+          return { cancelled, failedFiles, findings, scannedFiles };
+        }
+      );
+
+      if (result.cancelled) {
+        void vscode.window.showInformationMessage(
+          `Safe Code workspace scan cancelled after ${result.scannedFiles} files. Processed results were kept.`
+        );
+        return;
+      }
+
+      const failureSuffix = result.failedFiles > 0 ? ` ${result.failedFiles} files could not be read.` : "";
+      void vscode.window.showInformationMessage(
+        `Safe Code scanned ${result.scannedFiles} files and found ${result.findings} warnings.${failureSuffix}`
+      );
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Safe Code workspace scan failed: ${String(error)}`);
+    } finally {
+      workspaceScanInProgress = false;
+    }
+  };
+
   context.subscriptions.push(
     diagnostics,
     vscode.workspace.onDidOpenTextDocument(queueScan),
     vscode.workspace.onDidChangeTextDocument((event) => queueScan(event.document)),
-    vscode.workspace.onDidCloseTextDocument((document) => diagnostics.delete(document.uri)),
+    vscode.workspace.onDidCloseTextDocument((document) => {
+      if (!workspaceDiagnosticUris.has(document.uri.toString())) {
+        diagnostics.delete(document.uri);
+      }
+    }),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (editor) {
         queueScan(editor.document);
@@ -70,9 +202,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
       if (!isEnabled()) {
         diagnostics.clear();
+        workspaceDiagnosticUris.clear();
         return;
       }
 
+      clearWorkspaceDiagnostics();
       scanOpenDocuments();
     }),
     vscode.languages.registerCodeActionsProvider(
@@ -92,7 +226,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("safeCode.scanOpenFiles", () => {
       scanOpenDocuments();
       vscode.window.showInformationMessage("Safe Code scanned open workspace files.");
-    })
+    }),
+    vscode.commands.registerCommand(scanWorkspaceCommand, scanWorkspace)
   );
 
   scanOpenDocuments();
@@ -135,8 +270,18 @@ function isEnabled(): boolean {
 
 function getScannerOptions(): ScannerOptions {
   const configuration = vscode.workspace.getConfiguration("safeCode");
+  const configuredIgnoredPaths = configuration.get<string[]>("ignoredPaths", []);
   return {
     minimumSecretLength: configuration.get("minimumSecretLength", 8),
-    ignoredPaths: configuration.get("ignoredPaths", defaultIgnoredPaths)
+    ignoredPaths: [...new Set([...defaultIgnoredPaths, ...configuredIgnoredPaths])]
   };
+}
+
+function createExcludeGlob(ignoredPaths: string[]): string | undefined {
+  const patterns = [...new Set(ignoredPaths.map((pattern) => pattern.trim()).filter(Boolean))];
+  if (patterns.length === 0) {
+    return undefined;
+  }
+
+  return patterns.length === 1 ? patterns[0] : `{${patterns.join(",")}}`;
 }

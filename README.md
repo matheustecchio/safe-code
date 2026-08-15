@@ -6,7 +6,7 @@ Safe Code is a lightweight VS Code extension that detects possible hardcoded sec
 
 ## MVP features
 
-- Scans supported files in the current workspace when they are opened or changed.
+- Scans supported files when they are opened or changed, with a manual command for scanning the full workspace.
 - Adds VS Code diagnostics so matches appear as yellow warning underlines and in the Problems tab.
 - Provides a quick fix: `Safe Code: Ignore this warning`.
 - Stores ignored warnings locally in VS Code workspace storage using `file path + line hash + rule id`.
@@ -28,6 +28,7 @@ Safe Code ignores common placeholder values such as `example`, `sample`, `test`,
 ## Commands
 
 - `Safe Code: Scan Open Files` rescans currently open workspace files.
+- `Safe Code: Scan Workspace` scans every supported file in the current workspace and reports findings from both open and unopened files in the Problems tab. The scan shows cancellable progress and keeps results that were processed before cancellation.
 
 ## Documentation
 
@@ -53,3 +54,5 @@ Safe Code ignores common placeholder values such as `example`, `sample`, `test`,
   ]
 }
 ```
+
+The built-in dependency, build, and cache exclusions are always enforced. Add workspace-relative glob patterns to `safeCode.ignoredPaths` for project-specific generated files or directories.
