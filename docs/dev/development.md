@@ -2,7 +2,7 @@
 
 This guide covers the local development workflow and core architecture for Safe Code.
 
-Safe Code is a VS Code extension that scans open workspace files for suspicious hardcoded secrets. When it finds one, it creates a VS Code diagnostic so the editor shows a yellow underline and the Problems tab shows a warning.
+Safe Code is a VS Code extension that scans workspace files for suspicious hardcoded secrets. It scans open files automatically and can scan the full workspace on demand. When it finds a secret, it creates a VS Code diagnostic so the editor shows a yellow underline and the Problems tab shows a warning, including for files that were unopened when a workspace scan began.
 
 ## Requirements
 
@@ -118,7 +118,7 @@ safe-code/
 2. The extension creates a diagnostic collection named `safe-code`.
 3. The extension creates an `IgnoreStore` backed by VS Code `workspaceState`.
 4. The extension registers document, configuration, command, and quick-fix handlers.
-5. When a supported file opens or changes, Safe Code queues a scan with a short debounce.
+5. When a supported file opens or changes, Safe Code queues a scan with a short debounce. The workspace command instead discovers supported files across every open workspace folder and scans them with cancellable progress.
 6. The scanner checks whether the document should be scanned.
 7. The scanner core applies each rule from `src/rules.ts` to the document text.
 8. Findings that are not ignored are converted into VS Code diagnostics.
@@ -130,6 +130,7 @@ The extension activates from these events in `package.json`:
 
 - `onStartupFinished` activates Safe Code after VS Code finishes startup.
 - `onCommand:safeCode.scanOpenFiles` activates Safe Code if the scan command is run before startup activation.
+- `onCommand:safeCode.scanWorkspace` activates Safe Code if the workspace scan command is run before startup activation.
 
 The activation function is `activate(context)` in `src/extension.ts`.
 
@@ -139,12 +140,13 @@ The activation function is `activate(context)` in `src/extension.ts`.
 
 - `onDidOpenTextDocument` queues a scan when a file opens.
 - `onDidChangeTextDocument` queues a scan when a file changes.
-- `onDidCloseTextDocument` removes diagnostics for the closed file.
+- `onDidCloseTextDocument` removes diagnostics for the closed file unless they came from a workspace scan and must remain visible in the Problems tab.
 - `onDidChangeActiveTextEditor` queues a scan when the active editor changes.
 - `onDidChangeConfiguration` rescans open files when `safeCode` settings change.
 - `registerCodeActionsProvider` provides the `Safe Code: Ignore this warning` quick fix.
 - `safeCode.ignoreWarning` stores a local ignore entry and rescans the document.
 - `safeCode.scanOpenFiles` rescans open workspace files.
+- `safeCode.scanWorkspace` scans supported files across all open workspace folders.
 
 ## Debounced Scanning
 
@@ -156,16 +158,25 @@ This avoids rescanning on every keystroke while the user is typing quickly.
 
 The scanner only scans documents that pass `shouldScanDocument(document, options)` in `src/scanner.ts`.
 
-A document is skipped when:
+A URI or document is skipped when:
 
 - The URI scheme is not `file`.
 - The file is not inside a VS Code workspace folder.
 - The file extension is not supported.
-- The workspace-relative path matches `safeCode.ignoredPaths`.
+- The workspace-relative path matches a built-in exclusion or `safeCode.ignoredPaths`.
 
 Supported file types are code and config files such as `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.go`, `.java`, `.cs`, `.php`, `.rb`, `.env`, `.json`, `.yaml`, `.yml`, `.toml`, `.ini`, and `.md`.
 
 Default ignored paths include `node_modules`, `.git`, `dist`, `build`, `coverage`, `vendor`, `target`, and `.cache`.
+These defaults are always combined with user-configured ignore patterns so dependency, build, and cache directories cannot accidentally be included in a full workspace scan.
+
+## Workspace Scanning
+
+`safeCode.scanWorkspace` uses `vscode.workspace.findFiles` to discover files only within the currently open workspace folders. Built-in and configured ignore globs are passed to discovery so excluded directory trees are not traversed, and `shouldScanUri` applies the scanner's supported-file checks before a document is opened.
+
+The command displays a cancellable progress notification, opens each eligible file with the VS Code workspace API, and sends it through the same `scanDocument`, ignore-store, and diagnostic pipeline used for open files. An unreadable or concurrently deleted file is logged and skipped without stopping the remaining scan.
+
+Workspace-scan diagnostic URIs are tracked separately. Their Problems entries survive document-close events, a completed rescan removes stale entries, and relevant configuration changes clear persisted workspace results before currently open documents are rescanned. Cancelling keeps diagnostics produced for files already processed.
 
 ## Scanning
 
@@ -275,7 +286,7 @@ const exampleApiKey = "your-api-key-here";
 
 To add a detection rule, edit `src/rules.ts` and follow [Detection Rules](./rules.md).
 
-To change which files are scanned, edit `supportedExtensions` or `.env` handling in `src/scanner.ts`.
+To change which files are scanned, edit `supportedExtensions` or `.env` handling in `src/scannerCore.ts`.
 
 To change default skipped paths, update `defaultIgnoredPaths` in `src/scanner.ts` and the `safeCode.ignoredPaths` default in `package.json`.
 

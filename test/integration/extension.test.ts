@@ -67,6 +67,73 @@ suite("Safe Code extension", () => {
     assert.strictEqual(diagnostics[0].code, "generic-secret-assignment");
   });
 
+  test("registers the workspace command and diagnoses an unopened file", async () => {
+    const commands = await vscode.commands.getCommands(true);
+    assert.ok(commands.includes("safeCode.scanWorkspace"));
+
+    const uri = await createWorkspaceFile("unopened.ts", 'const apiKey = "workspace-secret-value";');
+    assert.strictEqual(vscode.workspace.textDocuments.some((document) => document.uri.toString() === uri.toString()), false);
+
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+    const diagnostics = await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+    assert.strictEqual(diagnostics[0].code, "generic-secret-assignment");
+
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    assert.strictEqual(getSafeCodeDiagnostics(uri).length, 1);
+  });
+
+  test("workspace scan honors default and custom ignored paths", async () => {
+    const dependencyUri = await createWorkspaceFile(
+      "node_modules/example/dependency.ts",
+      'const apiKey = "dependency-secret-value";'
+    );
+    const generatedUri = await createWorkspaceFile(
+      "generated/output.ts",
+      'const apiKey = "generated-secret-value";'
+    );
+    const supportedUri = await createWorkspaceFile("source.ts", 'const apiKey = "source-secret-value";');
+    const unsupportedUri = await createWorkspaceFile("notes.txt", 'const apiKey = "unsupported-secret-value";');
+
+    const configuration = vscode.workspace.getConfiguration("safeCode");
+    await configuration.update("ignoredPaths", ["**/generated/**"], vscode.ConfigurationTarget.Global);
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+
+    assert.deepStrictEqual(getSafeCodeDiagnostics(dependencyUri), []);
+    assert.deepStrictEqual(getSafeCodeDiagnostics(generatedUri), []);
+    assert.deepStrictEqual(getSafeCodeDiagnostics(unsupportedUri), []);
+    await eventually(() => getSafeCodeDiagnostics(supportedUri), (items) => items.length === 1);
+  });
+
+  test("workspace scan respects local warning ignores", async () => {
+    const uri = await createWorkspaceFile("ignored-warning.ts", 'const apiKey = "ignored-workspace-secret";');
+    const document = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(document);
+    await vscode.commands.executeCommand("safeCode.scanOpenFiles");
+    const diagnostics = await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+
+    await vscode.commands.executeCommand(
+      "safeCode.ignoreWarning",
+      uri,
+      diagnostics[0].range.start.line,
+      diagnostics[0].code
+    );
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+
+    assert.deepStrictEqual(getSafeCodeDiagnostics(uri), []);
+  });
+
+  test("workspace rescan removes a stale diagnostic", async () => {
+    const uri = await createWorkspaceFile("stale.ts", 'const apiKey = "stale-workspace-secret";');
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+
+    await vscode.workspace.fs.writeFile(uri, Buffer.from("export const clean = true;"));
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 0);
+  });
+
   test("automatically rescans a document after an edit", async () => {
     const uri = await createWorkspaceFile("edited.ts", "export const harmless = true;");
     const document = await vscode.workspace.openTextDocument(uri);
@@ -147,7 +214,14 @@ suite("Safe Code extension", () => {
   });
 
   async function createWorkspaceFile(fileName: string, content: string): Promise<vscode.Uri> {
-    const uri = vscode.Uri.joinPath(runtimeDirectory, `${Date.now()}-${fileName}`);
+    const relativeDirectory = path.posix.dirname(fileName);
+    const uniqueFileName = `${Date.now()}-${path.posix.basename(fileName)}`;
+    const uri =
+      relativeDirectory === "."
+        ? vscode.Uri.joinPath(runtimeDirectory, uniqueFileName)
+        : vscode.Uri.joinPath(runtimeDirectory, relativeDirectory, uniqueFileName);
+    const parentUri = vscode.Uri.file(path.dirname(uri.fsPath));
+    await vscode.workspace.fs.createDirectory(parentUri);
     await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
     createdWorkspaceFiles.push(uri);
     return uri;

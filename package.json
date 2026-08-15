@@ -24,7 +24,8 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "onCommand:safeCode.scanOpenFiles"
+    "onCommand:safeCode.scanOpenFiles",
+    "onCommand:safeCode.scanWorkspace"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -32,6 +33,10 @@
       {
         "command": "safeCode.scanOpenFiles",
         "title": "Safe Code: Scan Open Files"
+      },
+      {
+        "command": "safeCode.scanWorkspace",
+        "title": "Safe Code: Scan Workspace"
       }
     ],
     "configuration": {
