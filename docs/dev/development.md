@@ -118,7 +118,7 @@ safe-code/
 2. The extension creates a diagnostic collection named `safe-code`.
 3. The extension creates an `IgnoreStore` backed by VS Code `workspaceState`.
 4. The extension registers document, configuration, command, and quick-fix handlers.
-5. When a supported file opens or changes, Safe Code queues a scan with a short debounce. The workspace command instead discovers supported files across every open workspace folder and scans them with cancellable progress.
+5. Safe Code scans the workspace after activation when `safeCode.scanWorkspaceOnStartup` is enabled, then watches supported workspace files for later creates, changes, and deletes. Document edits and file events are debounced.
 6. The scanner checks whether the document should be scanned.
 7. The scanner core applies each rule from `src/rules.ts` to the document text.
 8. Findings that are not ignored are converted into VS Code diagnostics.
@@ -140,9 +140,10 @@ The activation function is `activate(context)` in `src/extension.ts`.
 
 - `onDidOpenTextDocument` queues a scan when a file opens.
 - `onDidChangeTextDocument` queues a scan when a file changes.
-- `onDidCloseTextDocument` removes diagnostics for the closed file unless they came from a workspace scan and must remain visible in the Problems tab.
+- `FileSystemWatcher.onDidCreate` and `onDidChange` queue scans for files changed inside or outside an editor.
+- `FileSystemWatcher.onDidDelete` removes diagnostics for deleted files.
 - `onDidChangeActiveTextEditor` queues a scan when the active editor changes.
-- `onDidChangeConfiguration` rescans open files when `safeCode` settings change.
+- `onDidChangeConfiguration` clears stale results and repeats the automatic workspace scan, or rescans open files when startup scanning is disabled.
 - `registerCodeActionsProvider` provides the `Safe Code: Ignore this warning` quick fix.
 - `safeCode.ignoreWarning` stores a local ignore entry and rescans the document.
 - `safeCode.scanOpenFiles` rescans open workspace files.
@@ -150,7 +151,7 @@ The activation function is `activate(context)` in `src/extension.ts`.
 
 ## Debounced Scanning
 
-`queueScan(document)` waits 250ms before running `scanNow(document)`. If the same document changes again before the timer fires, the old timer is cancelled.
+`queueScan(document)` and `queueUriScan(uri)` wait 250ms before scanning. If the same resource changes again before the timer fires, the old timer is cancelled.
 
 This avoids rescanning on every keystroke while the user is typing quickly.
 
@@ -172,11 +173,13 @@ These defaults are always combined with user-configured ignore patterns so depen
 
 ## Workspace Scanning
 
-`safeCode.scanWorkspace` uses `vscode.workspace.findFiles` to discover files only within the currently open workspace folders. Built-in and configured ignore globs are passed to discovery so excluded directory trees are not traversed, and `shouldScanUri` applies the scanner's supported-file checks before a document is opened.
+When `safeCode.scanWorkspaceOnStartup` is enabled, activation performs a quiet workspace scan with status-bar progress. The `safeCode.scanWorkspace` command runs the same scan manually with a cancellable notification and is contributed to the Command Palette, editor-tab context menu, and Explorer context menu.
+
+Workspace scanning uses `vscode.workspace.findFiles` to discover files only within the currently open workspace folders. Built-in and configured ignore globs are passed to discovery so excluded directory trees are not traversed, and `shouldScanUri` applies the scanner's supported-file checks before a document is opened.
 
 The command displays a cancellable progress notification, opens each eligible file with the VS Code workspace API, and sends it through the same `scanDocument`, ignore-store, and diagnostic pipeline used for open files. An unreadable or concurrently deleted file is logged and skipped without stopping the remaining scan.
 
-Workspace-scan diagnostic URIs are tracked separately. Their Problems entries survive document-close events, a completed rescan removes stale entries, and relevant configuration changes clear persisted workspace results before currently open documents are rescanned. Cancelling keeps diagnostics produced for files already processed.
+Diagnostic URIs are tracked independently of editor tabs, so Problems entries survive document-close events regardless of whether they came from an automatic, manual, or open-file scan. A completed workspace rescan and file-deletion events remove stale entries. Cancelling a manual scan keeps diagnostics produced for files already processed.
 
 ## Scanning
 
@@ -251,6 +254,7 @@ Settings are declared in `package.json` and read by `getScannerOptions()` in `sr
 Current settings are:
 
 - `safeCode.enabled` enables or disables diagnostics.
+- `safeCode.scanWorkspaceOnStartup` controls whether activation performs a full workspace scan. It defaults to `true`.
 - `safeCode.minimumSecretLength` controls the minimum value length for generic secret assignment rules.
 - `safeCode.ignoredPaths` controls workspace-relative glob patterns that Safe Code skips.
 
