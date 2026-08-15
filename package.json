@@ -33,6 +33,22 @@
         "title": "Safe Code: Scan Workspace"
       }
     ],
+    "menus": {
+      "editor/title/context": [
+        {
+          "command": "safeCode.scanWorkspace",
+          "when": "resourceScheme == file",
+          "group": "navigation@10"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "safeCode.scanWorkspace",
+          "when": "resourceScheme == file",
+          "group": "navigation@10"
+        }
+      ]
+    },
     "configuration": {
       "title": "Safe Code",
       "properties": {

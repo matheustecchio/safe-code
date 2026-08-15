@@ -104,6 +104,14 @@ suite("Safe Code extension", () => {
     const commands = await vscode.commands.getCommands(true);
     assert.ok(commands.includes("safeCode.scanWorkspace"));
 
+    const extension = vscode.extensions.getExtension(extensionId);
+    const menus = extension?.packageJSON.contributes?.menus;
+    assert.ok(
+      menus?.["editor/title/context"]?.some(
+        (item: { command?: string }) => item.command === "safeCode.scanWorkspace"
+      )
+    );
+
     const uri = await createWorkspaceFile("unopened.ts", 'const apiKey = "workspace-secret-value";');
     assert.strictEqual(vscode.workspace.textDocuments.some((document) => document.uri.toString() === uri.toString()), false);
 
