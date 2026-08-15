@@ -65,6 +65,24 @@ suite("Safe Code extension", () => {
     const diagnostics = await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
     assert.strictEqual(diagnostics[0].source, "Safe Code");
     assert.strictEqual(diagnostics[0].code, "generic-secret-assignment");
+
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    assert.strictEqual(getSafeCodeDiagnostics(uri).length, 1);
+  });
+
+  test("automatically maintains diagnostics for workspace file changes", async () => {
+    const uri = await createWorkspaceFile("watched.ts", 'const apiKey = "watched-secret-value";');
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+
+    await vscode.workspace.fs.writeFile(uri, Buffer.from("export const clean = true;"));
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 0);
+
+    await vscode.workspace.fs.writeFile(uri, Buffer.from('const token = "watched-secret-again";'));
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+
+    await vscode.workspace.fs.delete(uri, { useTrash: false });
+    createdWorkspaceFiles = createdWorkspaceFiles.filter((candidate) => candidate.toString() !== uri.toString());
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 0);
   });
 
   test("registers the workspace command and diagnoses an unopened file", async () => {
