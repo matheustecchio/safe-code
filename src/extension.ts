@@ -1,4 +1,10 @@
 import * as vscode from "vscode";
+import {
+  analyzeEnvironmentAssignment,
+  EnvironmentVariableConflictError,
+  isSupportedEnvironmentFixFile
+} from "./environmentFixCore";
+import { EnvironmentStore } from "./environmentStore";
 import { IgnoreStore } from "./ignoreStore";
 import { projectIgnoreConfigFileName, ProjectIgnoreStore } from "./projectIgnoreStore";
 import { defaultIgnoredPaths, scanDocument, ScannerOptions, shouldScanDocument, shouldScanUri } from "./scanner";
@@ -6,6 +12,7 @@ import { defaultIgnoredPaths, scanDocument, ScannerOptions, shouldScanDocument, 
 const diagnosticSource = "Safe Code";
 const ignoreWarningCommand = "safeCode.ignoreWarning";
 const ignoreWarningForProjectCommand = "safeCode.ignoreWarningForProject";
+const moveSecretToEnvCommand = "safeCode.moveSecretToEnv";
 const scanWorkspaceCommand = "safeCode.scanWorkspace";
 
 type WorkspaceScanResult = {
@@ -325,6 +332,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       new SafeCodeActionProvider(),
       { providedCodeActionKinds: SafeCodeActionProvider.providedCodeActionKinds }
     ),
+    vscode.commands.registerCommand(
+      moveSecretToEnvCommand,
+      async (uri: vscode.Uri, range: vscode.Range, ruleId: string) => {
+        try {
+          await moveSecretToEnvironment(uri, range, ruleId);
+        } catch (error) {
+          const message =
+            error instanceof EnvironmentVariableConflictError
+              ? `Safe Code did not move the secret: ${error.message}`
+              : `Safe Code could not move the secret to .env: ${String(error)}`;
+          output.appendLine(message);
+          void vscode.window.showErrorMessage(message);
+        }
+      }
+    ),
     vscode.commands.registerCommand(ignoreWarningCommand, async (uri: vscode.Uri, line: number, ruleId: string) => {
       const document = await vscode.workspace.openTextDocument(uri);
       if (line < 0 || line >= document.lineCount) {
@@ -380,6 +402,12 @@ class SafeCodeActionProvider implements vscode.CodeActionProvider {
   ): vscode.CodeAction[] {
     return context.diagnostics.filter(isSafeCodeDiagnostic).flatMap((diagnostic) => {
       const ruleId = String(diagnostic.code ?? "");
+      const actions: vscode.CodeAction[] = [];
+      const environmentAction = createEnvironmentCodeAction(document, diagnostic, ruleId);
+      if (environmentAction) {
+        actions.push(environmentAction);
+      }
+
       const localAction = new vscode.CodeAction("Safe Code: Ignore this warning", vscode.CodeActionKind.QuickFix);
       localAction.command = {
         command: ignoreWarningCommand,
@@ -400,8 +428,86 @@ class SafeCodeActionProvider implements vscode.CodeActionProvider {
       };
       projectAction.diagnostics = [diagnostic];
 
-      return [localAction, projectAction];
+      actions.push(localAction, projectAction);
+      return actions;
     });
+  }
+}
+
+function createEnvironmentCodeAction(
+  document: vscode.TextDocument,
+  diagnostic: vscode.Diagnostic,
+  ruleId: string
+): vscode.CodeAction | undefined {
+  if (
+    ruleId !== "generic-secret-assignment" ||
+    diagnostic.range.start.line !== diagnostic.range.end.line ||
+    !isSupportedEnvironmentFixFile(document.fileName)
+  ) {
+    return undefined;
+  }
+
+  const line = document.lineAt(diagnostic.range.start.line);
+  const assignment = analyzeEnvironmentAssignment(
+    line.text,
+    diagnostic.range.start.character,
+    diagnostic.range.end.character
+  );
+  if (!assignment) {
+    return undefined;
+  }
+
+  const action = new vscode.CodeAction("Safe Code: Move value to .env", vscode.CodeActionKind.QuickFix);
+  action.command = {
+    command: moveSecretToEnvCommand,
+    title: "Move value to .env",
+    arguments: [document.uri, diagnostic.range, ruleId]
+  };
+  action.diagnostics = [diagnostic];
+  return action;
+}
+
+async function moveSecretToEnvironment(uri: vscode.Uri, range: vscode.Range, ruleId: string): Promise<void> {
+  if (ruleId !== "generic-secret-assignment" || range.start.line !== range.end.line) {
+    return;
+  }
+
+  const document = await vscode.workspace.openTextDocument(uri);
+  if (
+    range.start.line < 0 ||
+    range.start.line >= document.lineCount ||
+    !isSupportedEnvironmentFixFile(document.fileName)
+  ) {
+    return;
+  }
+
+  const line = document.lineAt(range.start.line);
+  const assignment = analyzeEnvironmentAssignment(line.text, range.start.character, range.end.character);
+  if (!assignment) {
+    return;
+  }
+
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+  if (!workspaceFolder) {
+    return;
+  }
+
+  const environmentStore = new EnvironmentStore(workspaceFolder);
+  await environmentStore.write(assignment.environmentVariableName, assignment.secretValue);
+
+  const sourceEdit = new vscode.WorkspaceEdit();
+  sourceEdit.replace(
+    uri,
+    new vscode.Range(
+      range.start.line,
+      assignment.replacementStartCharacter,
+      range.start.line,
+      assignment.replacementEndCharacter
+    ),
+    assignment.replacement
+  );
+  if (!(await vscode.workspace.applyEdit(sourceEdit))) {
+    throw new Error("VS Code rejected the source edit. The environment files were preserved.");
   }
 }
 
