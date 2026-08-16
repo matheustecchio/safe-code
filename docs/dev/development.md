@@ -86,6 +86,8 @@ safe-code/
 │   └── safe-code.schema.json
 ├── src/
 │   ├── extension.ts
+│   ├── environmentFixCore.ts
+│   ├── environmentStore.ts
 │   ├── ignoreCore.ts
 │   ├── ignoreStore.ts
 │   ├── projectIgnoreStore.ts
@@ -109,6 +111,8 @@ safe-code/
 | --- | --- |
 | `package.json` | VS Code extension manifest, commands, activation events, settings, scripts, and dependencies. |
 | `src/extension.ts` | Extension entry point. Wires events, diagnostics, commands, settings, and quick fixes. |
+| `src/environmentFixCore.ts` | Parses unambiguous assignments, infers environment names, and safely updates environment-file text without importing VS Code. |
+| `src/environmentStore.ts` | Refuses unsafe environment-file targets, checks Git tracking, and writes `.gitignore`, `.env`, and `.env.example` in safety order. |
 | `src/ignoreCore.ts` | Contains VS Code-independent ignore identity, validation, parsing, and serialization logic. |
 | `src/scanner.ts` | Decides which documents can be scanned and turns regex matches into `SecretFinding` objects. |
 | `src/scannerCore.ts` | Contains VS Code-independent file filtering and text scanning logic. |
@@ -224,18 +228,32 @@ Each diagnostic uses:
 
 The diagnostics are stored with `diagnostics.set(document.uri, documentDiagnostics)`.
 
-## Ignore Quick Fix
+## Quick Fixes
 
 The quick fix is implemented by `SafeCodeActionProvider` in `src/extension.ts`.
 
 When VS Code asks for code actions, the provider:
 
 1. Filters diagnostics to only those with `source === "Safe Code"`.
-2. Creates the preferred `Safe Code: Ignore this warning` action for local storage.
-3. Creates `Safe Code: Ignore this warning for this project` for shared configuration.
-4. Passes the file URI, diagnostic line, and rule ID to the selected internal command.
+2. Offers `Safe Code: Move value to .env` for supported generic assignments.
+3. Creates the preferred `Safe Code: Ignore this warning` action for local storage.
+4. Creates `Safe Code: Ignore this warning for this project` for shared configuration.
+5. Passes the file URI, diagnostic range, and rule ID to the selected internal command.
 
-Both commands open the document, read the current line text, store the ignore entry, and rescan the document. The local action never changes project files. The project action is the only path that writes `.safe-code.json`; it refuses to overwrite malformed configuration.
+Both ignore commands open the document, read the current line text, store the ignore entry, and rescan the document. The local action never changes project files. The project action is the only path that writes `.safe-code.json`; it refuses to overwrite malformed configuration.
+
+### Move to `.env`
+
+The environment action is limited to `generic-secret-assignment` diagnostics in `.js`, `.jsx`, `.ts`, and `.tsx` files. `analyzeEnvironmentAssignment` in `src/environmentFixCore.ts` requires the diagnostic to cover the string value in an entire, simple declaration or direct identifier assignment. Object properties, member assignments, destructuring, template literals, escaped literals, concatenations, calls, and multiple assignments are rejected.
+
+At execution time the command reopens and revalidates the source so a stale diagnostic cannot transform changed code. It converts names such as `clientSecret` to `CLIENT_SECRET`, then prepares these workspace-root updates:
+
+- `.gitignore` receives an exact `.env` entry before any secret is written.
+- `.env` receives `CLIENT_SECRET="..."`; an existing different value causes the operation to stop.
+- `.env.example` receives only the empty `CLIENT_SECRET=` entry.
+- The source literal, including its quotes, becomes `process.env.CLIENT_SECRET`.
+
+The command refuses symbolic links and uses `git ls-files` to refuse a `.env` already tracked in the containing repository. A missing Git executable or a workspace outside a Git repository is allowed because the command creates the protective `.gitignore` entry. Other Git inspection errors fail closed. Environment files are written before the source edit so a failed edit cannot discard the only copy of the value.
 
 ## Ignore Storage
 
@@ -328,6 +346,8 @@ To change default skipped paths, update `defaultIgnoredPaths` in `src/scanner.ts
 To change diagnostics behavior, edit `scanNow(document)` in `src/extension.ts`.
 
 To change quick fixes, edit `SafeCodeActionProvider` in `src/extension.ts`.
+
+To change environment-assignment parsing, naming, or environment-file updates, edit `src/environmentFixCore.ts`.
 
 To change ignore behavior, edit `src/ignoreStore.ts`.
 

@@ -8,6 +8,7 @@ Safe Code is a lightweight VS Code extension that detects possible hardcoded sec
 
 - Automatically scans supported files across the workspace when Safe Code starts and keeps them updated as files change.
 - Adds VS Code diagnostics so matches appear as yellow warning underlines and in the Problems tab.
+- Moves supported JavaScript and TypeScript secret assignments to local environment configuration with a quick fix.
 - Provides local and shared-project quick fixes for known false positives.
 - Stores personal ignores locally in VS Code workspace storage and team ignores in `.safe-code.json`.
 - Skips noisy dependency/build folders such as `node_modules`, `.git`, `dist`, `build`, and `coverage`.
@@ -31,6 +32,24 @@ Safe Code ignores common placeholder values such as `example`, `sample`, `test`,
 - `Safe Code: Scan Workspace` scans every supported file in the current workspace and reports findings from both open and unopened files in the Problems tab. The scan shows cancellable progress and keeps results that were processed before cancellation.
 
 `Safe Code: Scan Workspace` is also available by right-clicking an editor tab or a file in the Explorer.
+
+## Moving secrets to environment variables
+
+For a generic warning on a simple JavaScript or TypeScript assignment, use `Safe Code: Move value to .env`. For example:
+
+```ts
+const clientSecret = "real-secret-value";
+```
+
+becomes:
+
+```ts
+const clientSecret = process.env.CLIENT_SECRET;
+```
+
+Safe Code infers an uppercase snake-case name, writes the real value to `.env` at the workspace-folder root, and creates or updates `.env.example` with an empty `CLIENT_SECRET=` entry. Before writing the value, it adds an exact `.env` entry to the root `.gitignore`.
+
+The fix refuses to modify a tracked `.env`, symbolic links, an existing environment variable with a different value, or ambiguous code such as object properties, destructuring, function calls, concatenations, and template literals. The secret value is never copied into `.env.example`. Existing ignore-warning quick fixes remain available.
 
 ## Ignoring warnings
 
