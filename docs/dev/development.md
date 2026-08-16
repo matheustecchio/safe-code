@@ -82,9 +82,13 @@ safe-code/
 │   └── dev/
 │       ├── development.md
 │       └── rules.md
+├── schemas/
+│   └── safe-code.schema.json
 ├── src/
 │   ├── extension.ts
+│   ├── ignoreCore.ts
 │   ├── ignoreStore.ts
+│   ├── projectIgnoreStore.ts
 │   ├── rules.ts
 │   ├── scannerCore.ts
 │   └── scanner.ts
@@ -105,10 +109,13 @@ safe-code/
 | --- | --- |
 | `package.json` | VS Code extension manifest, commands, activation events, settings, scripts, and dependencies. |
 | `src/extension.ts` | Extension entry point. Wires events, diagnostics, commands, settings, and quick fixes. |
+| `src/ignoreCore.ts` | Contains VS Code-independent ignore identity, validation, parsing, and serialization logic. |
 | `src/scanner.ts` | Decides which documents can be scanned and turns regex matches into `SecretFinding` objects. |
 | `src/scannerCore.ts` | Contains VS Code-independent file filtering and text scanning logic. |
 | `src/rules.ts` | Defines the secret detection rules and their messages. |
 | `src/ignoreStore.ts` | Stores and checks locally ignored warnings. |
+| `src/projectIgnoreStore.ts` | Loads, matches, and explicitly updates `.safe-code.json` for each workspace folder. |
+| `schemas/safe-code.schema.json` | Provides VS Code validation and editor help for project ignore configuration. |
 | `docs/dev/development.md` | Core developer workflow and architecture documentation. |
 | `docs/dev/rules.md` | Detection rule documentation. |
 
@@ -116,8 +123,8 @@ safe-code/
 
 1. VS Code activates the extension through `src/extension.ts`.
 2. The extension creates a diagnostic collection named `safe-code`.
-3. The extension creates an `IgnoreStore` backed by VS Code `workspaceState`.
-4. The extension registers document, configuration, command, and quick-fix handlers.
+3. The extension creates a local `IgnoreStore` and loads project ignores from each workspace folder.
+4. The extension registers document, workspace, configuration, command, and quick-fix handlers.
 5. Safe Code scans the workspace after activation when `safeCode.scanWorkspaceOnStartup` is enabled, then watches supported workspace files for later creates, changes, and deletes. Document edits and file events are debounced.
 6. The scanner checks whether the document should be scanned.
 7. The scanner core applies each rule from `src/rules.ts` to the document text.
@@ -140,12 +147,14 @@ The activation function is `activate(context)` in `src/extension.ts`.
 
 - `onDidOpenTextDocument` queues a scan when a file opens.
 - `onDidChangeTextDocument` queues a scan when a file changes.
-- `FileSystemWatcher.onDidCreate` and `onDidChange` queue scans for files changed inside or outside an editor.
-- `FileSystemWatcher.onDidDelete` removes diagnostics for deleted files.
+- `FileSystemWatcher.onDidCreate` and `onDidChange` queue scans for files changed inside or outside an editor. Changes to a root `.safe-code.json` reload project ignores and request a workspace rescan.
+- `FileSystemWatcher.onDidDelete` removes diagnostics for deleted files. Deleting `.safe-code.json` reloads the now-empty project ignore set and restores matching warnings.
 - `onDidChangeActiveTextEditor` queues a scan when the active editor changes.
 - `onDidChangeConfiguration` clears stale results and repeats the automatic workspace scan, or rescans open files when startup scanning is disabled.
-- `registerCodeActionsProvider` provides the `Safe Code: Ignore this warning` quick fix.
+- `onDidChangeWorkspaceFolders` reloads project configuration and scans the updated workspace.
+- `registerCodeActionsProvider` provides local and project-level ignore quick fixes.
 - `safeCode.ignoreWarning` stores a local ignore entry and rescans the document.
+- `safeCode.ignoreWarningForProject` adds an entry to the containing workspace folder's `.safe-code.json` and rescans the document.
 - `safeCode.scanOpenFiles` rescans open workspace files.
 - `safeCode.scanWorkspace` scans supported files across all open workspace folders.
 
@@ -177,7 +186,9 @@ When `safeCode.scanWorkspaceOnStartup` is enabled, activation performs a quiet w
 
 Workspace scanning uses `vscode.workspace.findFiles` to discover files only within the currently open workspace folders. Built-in and configured ignore globs are passed to discovery so excluded directory trees are not traversed, and `shouldScanUri` applies the scanner's supported-file checks before a document is opened.
 
-The command displays a cancellable progress notification, opens each eligible file with the VS Code workspace API, and sends it through the same `scanDocument`, ignore-store, and diagnostic pipeline used for open files. An unreadable or concurrently deleted file is logged and skipped without stopping the remaining scan.
+The command reloads project ignore configuration, displays a cancellable progress notification, opens each eligible file with the VS Code workspace API, and sends it through the same `scanDocument`, combined ignore-store, and diagnostic pipeline used for open files. An unreadable or concurrently deleted file is logged and skipped without stopping the remaining scan.
+
+Only one workspace scan runs at a time. A project configuration change during a scan requests one follow-up scan so the new ignore state is not lost.
 
 Diagnostic URIs are tracked independently of editor tabs, so Problems entries survive document-close events regardless of whether they came from an automatic, manual, or open-file scan. A completed workspace rescan and file-deletion events remove stale entries. Cancelling a manual scan keeps diagnostics produced for files already processed.
 
@@ -220,14 +231,15 @@ The quick fix is implemented by `SafeCodeActionProvider` in `src/extension.ts`.
 When VS Code asks for code actions, the provider:
 
 1. Filters diagnostics to only those with `source === "Safe Code"`.
-2. Creates a `CodeAction` titled `Safe Code: Ignore this warning`.
-3. Calls the internal command `safeCode.ignoreWarning` with the file URI, diagnostic line, and rule ID.
+2. Creates the preferred `Safe Code: Ignore this warning` action for local storage.
+3. Creates `Safe Code: Ignore this warning for this project` for shared configuration.
+4. Passes the file URI, diagnostic line, and rule ID to the selected internal command.
 
-The command opens the document, reads the current line text, stores the ignore entry, and rescans the document. The warning disappears if the stored ignore matches the new scan result.
+Both commands open the document, read the current line text, store the ignore entry, and rescan the document. The local action never changes project files. The project action is the only path that writes `.safe-code.json`; it refuses to overwrite malformed configuration.
 
 ## Ignore Storage
 
-Ignore storage lives in `src/ignoreStore.ts`.
+Shared identity and validation logic lives in `src/ignoreCore.ts`. Local storage lives in `src/ignoreStore.ts`, and project configuration access lives in `src/projectIgnoreStore.ts`.
 
 An ignored warning has this shape:
 
@@ -239,13 +251,32 @@ export type IgnoredWarning = {
 };
 ```
 
-The ignore key is based on:
+Every ignore key is based on:
 
-- Workspace folder name plus relative file path.
+- A file path.
 - A SHA-256 hash of the trimmed line text, shortened to 24 hex characters.
 - The rule ID that created the warning.
 
-Ignored warnings are stored in `context.workspaceState` under `safeCode.ignoredWarnings`. This means ignores are local to the user's VS Code workspace storage and are not committed to the project.
+Local warnings use the workspace folder name plus relative path and are stored in `context.workspaceState` under `safeCode.ignoredWarnings`. They remain local to the user's VS Code workspace storage and are not committed to the project.
+
+Project warnings use a POSIX-style path relative to the workspace folder containing `.safe-code.json`. Each workspace folder has an independent versioned configuration:
+
+```json
+{
+  "version": 1,
+  "ignoredWarnings": [
+    {
+      "filePath": "src/config.ts",
+      "lineHash": "0123456789abcdef01234567",
+      "ruleId": "generic-secret-assignment"
+    }
+  ]
+}
+```
+
+The parser validates the entire file before accepting any entry. Invalid JSON, unsupported versions, unexpected properties, malformed hashes, empty rule IDs, absolute paths, and parent-directory traversal reject the full project ignore set. Safe Code logs the error to its output channel and keeps warnings active. Duplicate valid entries are collapsed in memory.
+
+The project quick fix creates a missing configuration or appends and sorts an entry in a valid one. File-system watcher events reload configuration created or edited outside Safe Code. `package.json` associates the configuration file with `schemas/safe-code.schema.json` for editor validation.
 
 ## Settings
 
@@ -361,7 +392,5 @@ Safe Code currently has no runtime npm dependencies, so release commands use `--
 ## MVP Limitations
 
 - All diagnostics use Warning severity, even though rules already store `low`, `medium`, and `high` internally.
-- The scan command currently scans open workspace files, not the whole workspace.
-- Ignores are local only and are not shared with a team.
 - Changing the line text changes the line hash, so the old ignore no longer applies.
 - Detection is regex-based and intentionally avoids entropy detection for now.

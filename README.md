@@ -8,8 +8,8 @@ Safe Code is a lightweight VS Code extension that detects possible hardcoded sec
 
 - Automatically scans supported files across the workspace when Safe Code starts and keeps them updated as files change.
 - Adds VS Code diagnostics so matches appear as yellow warning underlines and in the Problems tab.
-- Provides a quick fix: `Safe Code: Ignore this warning`.
-- Stores ignored warnings locally in VS Code workspace storage using `file path + line hash + rule id`.
+- Provides local and shared-project quick fixes for known false positives.
+- Stores personal ignores locally in VS Code workspace storage and team ignores in `.safe-code.json`.
 - Skips noisy dependency/build folders such as `node_modules`, `.git`, `dist`, `build`, and `coverage`.
 
 ## Supported files
@@ -31,6 +31,29 @@ Safe Code ignores common placeholder values such as `example`, `sample`, `test`,
 - `Safe Code: Scan Workspace` scans every supported file in the current workspace and reports findings from both open and unopened files in the Problems tab. The scan shows cancellable progress and keeps results that were processed before cancellation.
 
 `Safe Code: Scan Workspace` is also available by right-clicking an editor tab or a file in the Explorer.
+
+## Ignoring warnings
+
+Use `Safe Code: Ignore this warning` to keep an ignore local to your VS Code workspace storage. This remains the preferred quick fix and does not change project files.
+
+Use `Safe Code: Ignore this warning for this project` when the false positive should be shared with the team. This explicit action creates or updates `.safe-code.json` at the root of the file's workspace folder:
+
+```json
+{
+  "version": 1,
+  "ignoredWarnings": [
+    {
+      "filePath": "src/config.ts",
+      "lineHash": "0123456789abcdef01234567",
+      "ruleId": "generic-secret-assignment"
+    }
+  ]
+}
+```
+
+Each entry matches the workspace-relative file path, the first 24 hexadecimal characters of the SHA-256 hash of the trimmed source line, and the detection rule ID. Changing the source line makes the old ignore stop matching. In a multi-root workspace, each folder has its own `.safe-code.json`.
+
+Safe Code reloads this file when it is created, changed, or deleted. Invalid configuration is reported in the **Safe Code** output channel and suppresses no warnings. The project quick fix will not overwrite an invalid file.
 
 ## Documentation
 

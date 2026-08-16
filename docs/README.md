@@ -13,6 +13,6 @@ Release instructions for maintainers are documented in the [Release Workflow](./
 
 ## Current MVP Scope
 
-Safe Code currently scans supported files that are open in the current VS Code workspace. It creates warning diagnostics for suspicious hardcoded secrets and lets the user ignore a specific warning locally.
+Safe Code scans supported files across the current VS Code workspace. It creates warning diagnostics for suspicious hardcoded secrets and supports local or shared project-level ignores.
 
-The command `Safe Code: Scan Open Files` rescans open workspace files. It does not scan every file in the workspace yet.
+The command `Safe Code: Scan Open Files` rescans open workspace files. `Safe Code: Scan Workspace` scans supported open and unopened files across every workspace folder.
