@@ -22,6 +22,9 @@ suite("Safe Code extension", () => {
   let workspaceRoot: vscode.Uri;
   let runtimeDirectory: vscode.Uri;
   let projectConfigUri: vscode.Uri;
+  let environmentUri: vscode.Uri;
+  let environmentExampleUri: vscode.Uri;
+  let gitIgnoreUri: vscode.Uri;
   let createdWorkspaceFiles: vscode.Uri[] = [];
 
   suiteSetup(async () => {
@@ -30,6 +33,9 @@ suite("Safe Code extension", () => {
     workspaceRoot = workspaceFolder.uri;
     runtimeDirectory = vscode.Uri.joinPath(workspaceRoot, runtimeDirectoryName);
     projectConfigUri = vscode.Uri.joinPath(workspaceRoot, ".safe-code.json");
+    environmentUri = vscode.Uri.joinPath(workspaceRoot, ".env");
+    environmentExampleUri = vscode.Uri.joinPath(workspaceRoot, ".env.example");
+    gitIgnoreUri = vscode.Uri.joinPath(workspaceRoot, ".gitignore");
     await vscode.workspace.fs.createDirectory(runtimeDirectory);
 
     const extension = vscode.extensions.getExtension(extensionId);
@@ -52,6 +58,9 @@ suite("Safe Code extension", () => {
     }
     createdWorkspaceFiles = [];
     await deleteIfExists(projectConfigUri);
+    await deleteIfExists(environmentUri);
+    await deleteIfExists(environmentExampleUri);
+    await deleteIfExists(gitIgnoreUri);
     await vscode.commands.executeCommand("safeCode.scanWorkspace");
   });
 
@@ -321,6 +330,69 @@ suite("Safe Code extension", () => {
     await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 0);
   });
 
+  test("moves a simple TypeScript secret to ignored environment files", async () => {
+    const secretValue = `move-secret-${Date.now()}`;
+    const uri = await createWorkspaceFile("environment-fix.ts", `export const clientSecret = "${secretValue}";`);
+    const document = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(document);
+    await vscode.commands.executeCommand("safeCode.scanOpenFiles");
+    const diagnostics = await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+
+    const actions = await requestCodeActions(uri, diagnostics[0].range);
+    const environmentAction = actions.find((candidate): candidate is vscode.CodeAction => {
+      return candidate instanceof vscode.CodeAction && candidate.title === "Safe Code: Move value to .env";
+    });
+    assert.ok(environmentAction?.command, "The environment quick fix was not returned");
+    assert.ok(
+      actions.some(
+        (candidate) => candidate instanceof vscode.CodeAction && candidate.title === "Safe Code: Ignore this warning"
+      ),
+      "The local ignore quick fix was removed"
+    );
+    assert.ok(
+      actions.some(
+        (candidate) =>
+          candidate instanceof vscode.CodeAction &&
+          candidate.title === "Safe Code: Ignore this warning for this project"
+      ),
+      "The project ignore quick fix was removed"
+    );
+
+    await vscode.commands.executeCommand(
+      environmentAction.command.command,
+      ...(environmentAction.command.arguments ?? [])
+    );
+
+    assert.strictEqual(document.getText(), "export const clientSecret = process.env.CLIENT_SECRET;");
+    assert.strictEqual(await readWorkspaceText(environmentUri), `CLIENT_SECRET=${JSON.stringify(secretValue)}\n`);
+    assert.strictEqual(await readWorkspaceText(environmentExampleUri), "CLIENT_SECRET=\n");
+    assert.strictEqual(await readWorkspaceText(gitIgnoreUri), ".env\n");
+    assert.ok(!(await readWorkspaceText(environmentExampleUri)).includes(secretValue));
+  });
+
+  test("does not offer the environment fix for ambiguous or unsupported assignments", async () => {
+    const ambiguousUri = await createWorkspaceFile(
+      "ambiguous-fix.ts",
+      'const config = { apiKey: "ambiguous-secret-value" };'
+    );
+    const unsupportedUri = await createWorkspaceFile(
+      "unsupported-fix.json",
+      '{"apiKey": "unsupported-secret-value"}'
+    );
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+
+    for (const uri of [ambiguousUri, unsupportedUri]) {
+      const diagnostics = await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+      const actions = await requestCodeActions(uri, diagnostics[0].range);
+      assert.ok(
+        !actions.some(
+          (candidate) => candidate instanceof vscode.CodeAction && candidate.title === "Safe Code: Move value to .env"
+        ),
+        uri.fsPath
+      );
+    }
+  });
+
   test("does not diagnose clean, unsupported, or out-of-workspace files", async () => {
     const cleanUri = await createWorkspaceFile("clean.ts", 'const apiKey = "your-api-key-here";');
     const unsupportedUri = await createWorkspaceFile("unsupported.txt", 'const apiKey = "real-looking-secret";');
@@ -380,6 +452,10 @@ async function deleteIfExists(uri: vscode.Uri): Promise<void> {
       throw error;
     }
   }
+}
+
+async function readWorkspaceText(uri: vscode.Uri): Promise<string> {
+  return Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8");
 }
 
 async function requestCodeActions(
