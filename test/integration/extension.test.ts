@@ -3,6 +3,7 @@ import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
+import { hashLineText } from "../../src/ignoreCore";
 
 const extensionId = "matheus-tecchio.safe-code";
 const runtimeDirectoryName = "runtime";
@@ -20,6 +21,7 @@ const defaultIgnoredPaths = [
 suite("Safe Code extension", () => {
   let workspaceRoot: vscode.Uri;
   let runtimeDirectory: vscode.Uri;
+  let projectConfigUri: vscode.Uri;
   let createdWorkspaceFiles: vscode.Uri[] = [];
 
   suiteSetup(async () => {
@@ -27,6 +29,7 @@ suite("Safe Code extension", () => {
     assert.ok(workspaceFolder, "The integration fixture workspace must be open");
     workspaceRoot = workspaceFolder.uri;
     runtimeDirectory = vscode.Uri.joinPath(workspaceRoot, runtimeDirectoryName);
+    projectConfigUri = vscode.Uri.joinPath(workspaceRoot, ".safe-code.json");
     await vscode.workspace.fs.createDirectory(runtimeDirectory);
 
     const extension = vscode.extensions.getExtension(extensionId);
@@ -48,6 +51,8 @@ suite("Safe Code extension", () => {
       await vscode.workspace.fs.delete(uri, { useTrash: false });
     }
     createdWorkspaceFiles = [];
+    await deleteIfExists(projectConfigUri);
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
   });
 
   suiteTeardown(async () => {
@@ -164,6 +169,89 @@ suite("Safe Code extension", () => {
     assert.deepStrictEqual(getSafeCodeDiagnostics(uri), []);
   });
 
+  test("reloads project ignores when configuration is created and deleted", async () => {
+    const lineText = 'const apiKey = "shared-project-secret";';
+    const uri = await createWorkspaceFile("shared-ignore.ts", lineText);
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+
+    await writeProjectConfig([
+      {
+        filePath: getWorkspaceRelativePath(uri),
+        lineHash: hashLineText(lineText),
+        ruleId: "generic-secret-assignment"
+      }
+    ]);
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 0);
+
+    await deleteIfExists(projectConfigUri);
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+  });
+
+  test("offers a project quick fix and keeps local and project ignores independent", async () => {
+    const projectLine = 'const apiKey = "project-quick-fix-secret";';
+    const projectUri = await createWorkspaceFile("project-quick-fix.ts", projectLine);
+    const projectDiagnostics = await eventually(
+      () => getSafeCodeDiagnostics(projectUri),
+      (items) => items.length === 1
+    );
+
+    const actions = await requestCodeActions(projectUri, projectDiagnostics[0].range);
+    const projectAction = actions.find((candidate): candidate is vscode.CodeAction => {
+      return candidate instanceof vscode.CodeAction && candidate.title === "Safe Code: Ignore this warning for this project";
+    });
+    assert.ok(projectAction?.command, "The Safe Code project ignore quick fix was not returned");
+    assert.strictEqual(projectAction.command.command, "safeCode.ignoreWarningForProject");
+    assert.notStrictEqual(projectAction.isPreferred, true);
+
+    await vscode.commands.executeCommand(projectAction.command.command, ...(projectAction.command.arguments ?? []));
+    await eventually(() => getSafeCodeDiagnostics(projectUri), (items) => items.length === 0);
+
+    const projectConfigBeforeLocalIgnore = await vscode.workspace.fs.readFile(projectConfigUri);
+    const parsedConfig = JSON.parse(Buffer.from(projectConfigBeforeLocalIgnore).toString("utf8"));
+    assert.deepStrictEqual(parsedConfig, {
+      version: 1,
+      ignoredWarnings: [
+        {
+          filePath: getWorkspaceRelativePath(projectUri),
+          lineHash: hashLineText(projectLine),
+          ruleId: "generic-secret-assignment"
+        }
+      ]
+    });
+
+    const localUri = await createWorkspaceFile("local-alongside-project.ts", 'const token = "local-ignore-secret";');
+    const localDiagnostics = await eventually(() => getSafeCodeDiagnostics(localUri), (items) => items.length === 1);
+    await vscode.commands.executeCommand(
+      "safeCode.ignoreWarning",
+      localUri,
+      localDiagnostics[0].range.start.line,
+      localDiagnostics[0].code
+    );
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+
+    assert.deepStrictEqual(getSafeCodeDiagnostics(projectUri), []);
+    assert.deepStrictEqual(getSafeCodeDiagnostics(localUri), []);
+    const projectConfigAfterLocalIgnore = await vscode.workspace.fs.readFile(projectConfigUri);
+    assert.deepStrictEqual(projectConfigAfterLocalIgnore, projectConfigBeforeLocalIgnore);
+  });
+
+  test("keeps warnings active and preserves invalid project configuration", async () => {
+    const invalidConfig = Buffer.from('{"version":1,"ignoredWarnings":[{"filePath":"../outside.ts"}]}');
+    await vscode.workspace.fs.writeFile(projectConfigUri, invalidConfig);
+    const uri = await createWorkspaceFile("invalid-project-config.ts", 'const apiKey = "still-visible-secret";');
+    const diagnostics = await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+
+    await vscode.commands.executeCommand(
+      "safeCode.ignoreWarningForProject",
+      uri,
+      diagnostics[0].range.start.line,
+      diagnostics[0].code
+    );
+
+    assert.deepStrictEqual(await vscode.workspace.fs.readFile(projectConfigUri), invalidConfig);
+    assert.strictEqual(getSafeCodeDiagnostics(uri).length, 1);
+  });
+
   test("workspace rescan removes a stale diagnostic", async () => {
     const uri = await createWorkspaceFile("stale.ts", 'const apiKey = "stale-workspace-secret";');
     await vscode.commands.executeCommand("safeCode.scanWorkspace");
@@ -267,10 +355,31 @@ suite("Safe Code extension", () => {
     createdWorkspaceFiles.push(uri);
     return uri;
   }
+
+  async function writeProjectConfig(ignoredWarnings: Array<Record<string, string>>): Promise<void> {
+    await vscode.workspace.fs.writeFile(
+      projectConfigUri,
+      Buffer.from(`${JSON.stringify({ version: 1, ignoredWarnings }, null, 2)}\n`)
+    );
+  }
+
+  function getWorkspaceRelativePath(uri: vscode.Uri): string {
+    return path.relative(workspaceRoot.fsPath, uri.fsPath).split(path.sep).join("/");
+  }
 });
 
 function getSafeCodeDiagnostics(uri: vscode.Uri): vscode.Diagnostic[] {
   return vscode.languages.getDiagnostics(uri).filter((diagnostic) => diagnostic.source === "Safe Code");
+}
+
+async function deleteIfExists(uri: vscode.Uri): Promise<void> {
+  try {
+    await vscode.workspace.fs.delete(uri, { useTrash: false });
+  } catch (error) {
+    if (!(error instanceof vscode.FileSystemError) || error.code !== "FileNotFound") {
+      throw error;
+    }
+  }
 }
 
 async function requestCodeActions(

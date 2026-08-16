@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Safe Code project ignore configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "ignoredWarnings"
+  ],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Safe Code project ignore configuration format version."
+    },
+    "ignoredWarnings": {
+      "type": "array",
+      "description": "Warnings shared by the project and ignored for every workspace user.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "filePath",
+          "lineHash",
+          "ruleId"
+        ],
+        "properties": {
+          "filePath": {
+            "type": "string",
+            "minLength": 1,
+            "description": "POSIX-style path relative to the workspace folder containing .safe-code.json."
+          },
+          "lineHash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{24}$",
+            "description": "First 24 hexadecimal characters of the SHA-256 hash of the trimmed source line."
+          },
+          "ruleId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Stable Safe Code rule identifier for the warning."
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,9 +1,11 @@
 import * as vscode from "vscode";
 import { IgnoreStore } from "./ignoreStore";
+import { projectIgnoreConfigFileName, ProjectIgnoreStore } from "./projectIgnoreStore";
 import { defaultIgnoredPaths, scanDocument, ScannerOptions, shouldScanDocument, shouldScanUri } from "./scanner";
 
 const diagnosticSource = "Safe Code";
 const ignoreWarningCommand = "safeCode.ignoreWarning";
+const ignoreWarningForProjectCommand = "safeCode.ignoreWarningForProject";
 const scanWorkspaceCommand = "safeCode.scanWorkspace";
 
 type WorkspaceScanResult = {
@@ -13,12 +15,17 @@ type WorkspaceScanResult = {
   scannedFiles: number;
 };
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const diagnostics = vscode.languages.createDiagnosticCollection("safe-code");
+  const output = vscode.window.createOutputChannel("Safe Code");
   const ignoreStore = new IgnoreStore(context.workspaceState);
+  const projectIgnoreStore = new ProjectIgnoreStore(output);
   const pendingScans = new Map<string, ReturnType<typeof setTimeout>>();
   const diagnosticUris = new Map<string, vscode.Uri>();
   let workspaceScanInProgress = false;
+  let workspaceRescanRequested = false;
+
+  await projectIgnoreStore.reloadAll();
 
   const scanNow = (document: vscode.TextDocument, options = getScannerOptions()): number => {
     const key = document.uri.toString();
@@ -30,7 +37,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     const documentDiagnostics = scanDocument(document, options)
-      .filter((finding) => !ignoreStore.isIgnored(document.uri, finding.lineText, finding.ruleId))
+      .filter((finding) => {
+        return (
+          !ignoreStore.isIgnored(document.uri, finding.lineText, finding.ruleId) &&
+          !projectIgnoreStore.isIgnored(document.uri, finding.lineText, finding.ruleId)
+        );
+      })
       .map((finding) => {
         const diagnostic = new vscode.Diagnostic(finding.range, finding.message, vscode.DiagnosticSeverity.Warning);
         diagnostic.source = diagnosticSource;
@@ -137,6 +149,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     if (workspaceScanInProgress) {
+      if (!interactive) {
+        workspaceRescanRequested = true;
+      }
       if (interactive) {
         void vscode.window.showInformationMessage("A Safe Code workspace scan is already running.");
       }
@@ -145,6 +160,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     workspaceScanInProgress = true;
     try {
+      await projectIgnoreStore.reloadAll();
       const result = await vscode.window.withProgress(
         {
           location: interactive ? vscode.ProgressLocation.Notification : vscode.ProgressLocation.Window,
@@ -232,17 +248,47 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showErrorMessage(`Safe Code workspace scan failed: ${String(error)}`);
     } finally {
       workspaceScanInProgress = false;
+      if (workspaceRescanRequested) {
+        workspaceRescanRequested = false;
+        void scanWorkspace(false);
+      }
     }
+  };
+
+  const refreshProjectConfiguration = async (uri: vscode.Uri): Promise<void> => {
+    await projectIgnoreStore.reloadForUri(uri);
+    if (isEnabled()) {
+      void scanWorkspace(false);
+    }
+  };
+
+  const handleFileCreateOrChange = (uri: vscode.Uri): void => {
+    if (projectIgnoreStore.isConfigUri(uri)) {
+      void refreshProjectConfiguration(uri);
+      return;
+    }
+
+    queueUriScan(uri);
+  };
+
+  const handleFileDelete = (uri: vscode.Uri): void => {
+    if (projectIgnoreStore.isConfigUri(uri)) {
+      void refreshProjectConfiguration(uri);
+      return;
+    }
+
+    removeDiagnostics(uri);
   };
 
   const fileWatcher = vscode.workspace.createFileSystemWatcher("**/*");
 
   context.subscriptions.push(
     diagnostics,
+    output,
     fileWatcher,
-    fileWatcher.onDidCreate(queueUriScan),
-    fileWatcher.onDidChange(queueUriScan),
-    fileWatcher.onDidDelete(removeDiagnostics),
+    fileWatcher.onDidCreate(handleFileCreateOrChange),
+    fileWatcher.onDidChange(handleFileCreateOrChange),
+    fileWatcher.onDidDelete(handleFileDelete),
     vscode.workspace.onDidOpenTextDocument(queueScan),
     vscode.workspace.onDidChangeTextDocument((event) => queueScan(event.document)),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
@@ -267,6 +313,13 @@ export function activate(context: vscode.ExtensionContext): void {
         scanOpenDocuments();
       }
     }),
+    vscode.workspace.onDidChangeWorkspaceFolders(async () => {
+      await projectIgnoreStore.reloadAll();
+      clearTrackedDiagnostics();
+      if (isEnabled()) {
+        void scanWorkspace(false);
+      }
+    }),
     vscode.languages.registerCodeActionsProvider(
       { scheme: "file" },
       new SafeCodeActionProvider(),
@@ -281,6 +334,24 @@ export function activate(context: vscode.ExtensionContext): void {
       await ignoreStore.add(uri, document.lineAt(line).text, ruleId);
       scanNow(document);
     }),
+    vscode.commands.registerCommand(
+      ignoreWarningForProjectCommand,
+      async (uri: vscode.Uri, line: number, ruleId: string) => {
+        const document = await vscode.workspace.openTextDocument(uri);
+        if (line < 0 || line >= document.lineCount) {
+          return;
+        }
+
+        try {
+          await projectIgnoreStore.add(uri, document.lineAt(line).text, ruleId);
+          scanNow(document);
+        } catch (error) {
+          const message = `Safe Code could not update ${projectIgnoreConfigFileName}: ${String(error)}`;
+          output.appendLine(message);
+          void vscode.window.showErrorMessage(message);
+        }
+      }
+    ),
     vscode.commands.registerCommand("safeCode.scanOpenFiles", () => {
       scanOpenDocuments();
       vscode.window.showInformationMessage("Safe Code scanned open workspace files.");
@@ -307,17 +378,29 @@ class SafeCodeActionProvider implements vscode.CodeActionProvider {
     _range: vscode.Range | vscode.Selection,
     context: vscode.CodeActionContext
   ): vscode.CodeAction[] {
-    return context.diagnostics.filter(isSafeCodeDiagnostic).map((diagnostic) => {
+    return context.diagnostics.filter(isSafeCodeDiagnostic).flatMap((diagnostic) => {
       const ruleId = String(diagnostic.code ?? "");
-      const action = new vscode.CodeAction("Safe Code: Ignore this warning", vscode.CodeActionKind.QuickFix);
-      action.command = {
+      const localAction = new vscode.CodeAction("Safe Code: Ignore this warning", vscode.CodeActionKind.QuickFix);
+      localAction.command = {
         command: ignoreWarningCommand,
         title: "Ignore this warning",
         arguments: [document.uri, diagnostic.range.start.line, ruleId]
       };
-      action.diagnostics = [diagnostic];
-      action.isPreferred = true;
-      return action;
+      localAction.diagnostics = [diagnostic];
+      localAction.isPreferred = true;
+
+      const projectAction = new vscode.CodeAction(
+        "Safe Code: Ignore this warning for this project",
+        vscode.CodeActionKind.QuickFix
+      );
+      projectAction.command = {
+        command: ignoreWarningForProjectCommand,
+        title: "Ignore this warning for this project",
+        arguments: [document.uri, diagnostic.range.start.line, ruleId]
+      };
+      projectAction.diagnostics = [diagnostic];
+
+      return [localAction, projectAction];
     });
   }
 }

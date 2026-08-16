@@ -49,6 +49,12 @@
         }
       ]
     },
+    "jsonValidation": [
+      {
+        "fileMatch": "**/.safe-code.json",
+        "url": "./schemas/safe-code.schema.json"
+      }
+    ],
     "configuration": {
       "title": "Safe Code",
       "properties": {
