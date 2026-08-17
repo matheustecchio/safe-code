@@ -5,6 +5,7 @@
 .vscode-test.js
 .test-out/**
 AGENT.md
+CLAUDE.md
 docs/**
 test/**
 node_modules/**
