@@ -15,6 +15,8 @@ This repository contains Safe Code, a VS Code extension that detects suspicious 
 
 - `package.json` defines extension metadata, commands, settings, activation events, scripts, and dev dependencies.
 - `src/extension.ts` wires activation, diagnostics, event listeners, commands, and quick fixes.
+- `src/environmentFixCore.ts` parses supported assignments, infers environment names, and updates environment-file text.
+- `src/environmentStore.ts` protects and writes workspace-root environment files for the move-secret quick fix.
 - `src/scanner.ts` filters documents and turns rule matches into findings.
 - `src/rules.ts` defines secret detection regex rules.
 - `src/ignoreCore.ts` defines shared ignore identities and validates project ignore configuration.
