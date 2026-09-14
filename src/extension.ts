@@ -6,7 +6,11 @@ import {
 } from "./environmentFixCore";
 import { EnvironmentStore } from "./environmentStore";
 import { IgnoreStore } from "./ignoreStore";
-import { projectIgnoreConfigFileName, ProjectIgnoreStore } from "./projectIgnoreStore";
+import {
+  getProjectIgnoreFileErrorMessage,
+  projectIgnoreConfigFileName,
+  ProjectIgnoreStore
+} from "./projectIgnoreStore";
 import { defaultIgnoredPaths, scanDocument, ScannerOptions, shouldScanDocument, shouldScanUri } from "./scanner";
 
 const diagnosticSource = "Safe Code";
@@ -368,7 +372,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           await projectIgnoreStore.add(uri, document.lineAt(line).text, ruleId);
           scanNow(document);
         } catch (error) {
-          const message = `Safe Code could not update ${projectIgnoreConfigFileName}: ${String(error)}`;
+          const message = `Safe Code could not update ${projectIgnoreConfigFileName}. ${getProjectIgnoreFileErrorMessage(
+            error,
+            "write-failed"
+          )}`;
           output.appendLine(message);
           void vscode.window.showErrorMessage(message);
         }
