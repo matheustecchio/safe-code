@@ -90,6 +90,7 @@ safe-code/
 │   ├── environmentStore.ts
 │   ├── ignoreCore.ts
 │   ├── ignoreStore.ts
+│   ├── projectIgnoreFile.ts
 │   ├── projectIgnoreStore.ts
 │   ├── rules.ts
 │   ├── scannerCore.ts
@@ -114,6 +115,7 @@ safe-code/
 | `src/environmentFixCore.ts` | Parses unambiguous assignments, infers environment names, and safely updates environment-file text without importing VS Code. |
 | `src/environmentStore.ts` | Refuses unsafe environment-file targets, checks Git tracking, and writes `.gitignore`, `.env`, and `.env.example` in safety order. |
 | `src/ignoreCore.ts` | Contains VS Code-independent ignore identity, validation, parsing, and serialization logic. |
+| `src/projectIgnoreFile.ts` | Performs no-follow reads, stable snapshot validation, and atomic Node filesystem updates for `.safe-code.json`. |
 | `src/scanner.ts` | Decides which documents can be scanned and turns regex matches into `SecretFinding` objects. |
 | `src/scannerCore.ts` | Contains VS Code-independent file filtering and text scanning logic. |
 | `src/rules.ts` | Defines the secret detection rules and their messages. |
@@ -240,7 +242,7 @@ When VS Code asks for code actions, the provider:
 4. Creates `Safe Code: Ignore this warning for this project` for shared configuration.
 5. Passes the file URI, diagnostic range, and rule ID to the selected internal command.
 
-Both ignore commands open the document, read the current line text, store the ignore entry, and rescan the document. The local action never changes project files. The project action is the only path that writes `.safe-code.json`; it refuses to overwrite malformed configuration.
+Both ignore commands open the document, read the current line text, store the ignore entry, and rescan the document. The local action never changes project files. The project action is the only path that writes `.safe-code.json`; it refuses to overwrite malformed or unsafe configuration targets. Project reads, reloads, and writes are serialized per workspace folder so watcher activity and simultaneous quick fixes cannot lose an update or restore stale cached ignores.
 
 ### Move to `.env`
 
@@ -257,7 +259,7 @@ The command refuses symbolic links and uses `git ls-files` to refuse a `.env` al
 
 ## Ignore Storage
 
-Shared identity and validation logic lives in `src/ignoreCore.ts`. Local storage lives in `src/ignoreStore.ts`, and project configuration access lives in `src/projectIgnoreStore.ts`.
+Shared identity and validation logic lives in `src/ignoreCore.ts`. Local storage lives in `src/ignoreStore.ts`, the Node-only safe file layer lives in `src/projectIgnoreFile.ts`, and the VS Code project adapter lives in `src/projectIgnoreStore.ts`.
 
 An ignored warning has this shape:
 
@@ -294,7 +296,9 @@ Project warnings use a POSIX-style path relative to the workspace folder contain
 
 The parser validates the entire file before accepting any entry. Invalid JSON, unsupported versions, unexpected properties, malformed hashes, empty rule IDs, absolute paths, and parent-directory traversal reject the full project ignore set. Safe Code logs the error to its output channel and keeps warnings active. Duplicate valid entries are collapsed in memory.
 
-The project quick fix creates a missing configuration or appends and sorts an entry in a valid one. File-system watcher events reload configuration created or edited outside Safe Code. `package.json` associates the configuration file with `schemas/safe-code.schema.json` for editor validation.
+The file layer inspects `.safe-code.json` without following symbolic links, reads regular files through an opened descriptor, and checks the descriptor and path identity before accepting a stable byte snapshot. Symbolic links, directories, other non-regular entries, non-file workspace URIs, and concurrent changes are rejected with fixed messages that do not include configuration contents or parser details.
+
+The project quick fix creates a missing configuration with an exclusive final-path open. For an existing valid file, it writes an exclusively created sibling temporary file, preserves the existing permission mode, revalidates the original identity and exact bytes, and atomically renames the temporary file into place. A post-write check must succeed before the in-memory ignore cache is updated. On any read, validation, or write failure, cached project ignores for that workspace are removed so warnings remain active. File-system watcher events reload configuration created or edited outside Safe Code. `package.json` associates the configuration file with `schemas/safe-code.schema.json` for editor validation.
 
 ## Settings
 
