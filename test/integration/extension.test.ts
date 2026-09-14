@@ -306,7 +306,8 @@ suite("Safe Code extension", () => {
   test("workspace scan honors default and custom ignored paths", async () => {
     const dependencyUri = await createWorkspaceFile(
       "node_modules/example/dependency.ts",
-      'const apiKey = "dependency-secret-value";'
+      'const apiKey = "dependency-secret-value";',
+      { waitForCreateEvent: false }
     );
     const generatedUri = await createWorkspaceFile(
       "generated/output.ts",
@@ -580,7 +581,11 @@ suite("Safe Code extension", () => {
     }
   });
 
-  async function createWorkspaceFile(fileName: string, content: string): Promise<vscode.Uri> {
+  async function createWorkspaceFile(
+    fileName: string,
+    content: string,
+    options: { waitForCreateEvent?: boolean } = {}
+  ): Promise<vscode.Uri> {
     const relativeDirectory = path.posix.dirname(fileName);
     const uniqueFileName = `${Date.now()}-${path.posix.basename(fileName)}`;
     const uri =
@@ -589,7 +594,11 @@ suite("Safe Code extension", () => {
         : vscode.Uri.joinPath(runtimeDirectory, relativeDirectory, uniqueFileName);
     const parentUri = vscode.Uri.file(path.dirname(uri.fsPath));
     await vscode.workspace.fs.createDirectory(parentUri);
-    await writeWorkspaceFileAndWaitForCreate(uri, content);
+    if (options.waitForCreateEvent !== false) {
+      await writeWorkspaceFileAndWaitForCreate(uri, content);
+    } else {
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
+    }
     createdWorkspaceFiles.push(uri);
     return uri;
   }
