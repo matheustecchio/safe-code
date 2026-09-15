@@ -100,9 +100,11 @@
     "compile:tests": "tsc -p ./tsconfig.test.json",
     "compile:all": "npm run compile && npm run compile:tests",
     "watch": "tsc -watch -p ./",
-    "test": "npm run test:unit && npm run test:integration",
+    "test": "npm run test:release && npm run test:unit && npm run test:integration",
+    "test:release": "node --test test/release/*.test.mjs",
     "test:unit": "npm run compile:tests && mocha --ui tdd --timeout 5000 \".test-out/test/unit/**/*.test.js\"",
-    "test:integration": "npm run compile:all && vscode-test --label integration"
+    "test:integration": "npm run compile:all && vscode-test --label integration",
+    "verify:workflow-pins": "node scripts/verify-workflow-pins.mjs"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -110,6 +112,8 @@
     "@types/vscode": "^1.90.0",
     "@vscode/test-cli": "0.0.12",
     "@vscode/test-electron": "2.5.2",
+    "@vscode/vsce": "4.0.0",
+    "js-yaml": "4.3.2",
     "mocha": "^11.8.0",
     "typescript": "^5.5.3"
   }
