@@ -74,6 +74,12 @@ Each entry matches the workspace-relative file path, the first 24 hexadecimal ch
 
 Safe Code reloads this file when it is created, changed, or deleted. Invalid configuration is reported in the **Safe Code** output channel and suppresses no warnings. The project quick fix will not overwrite an invalid file.
 
+## Release integrity
+
+The release workflow builds and tests the extension once with pinned Node.js, VSCE, runner, and GitHub Action versions. It records the source commit, tool versions, artifact size, and SHA-256 digest in `release-manifest.json`, then passes the same prebuilt VSIX to the Visual Studio Marketplace publisher and the GitHub release publisher. The GitHub Release contains the versioned VSIX, its `.sha256` file, and the manifest.
+
+Pull requests and `publish: false` manual runs exercise the complete build, test, and packaging path without publishing or receiving publication credentials. Production publication is restricted to a manual run from `main` with an exact expected version and Marketplace OIDC trust. The Marketplace signs and repackages extensions, so its public download bytes can differ from the uploaded VSIX; the GitHub asset and recorded digest preserve the original build artifact for independent verification.
+
 ## Documentation
 
 - [Documentation index](./docs/README.md)

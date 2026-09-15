@@ -6,7 +6,7 @@ Safe Code is a VS Code extension that scans workspace files for suspicious hardc
 
 ## Requirements
 
-- Node.js compatible with the TypeScript and VS Code extension dependencies.
+- Node.js 22.23.2, matching CI and the release workflow.
 - VS Code for running and debugging the extension.
 - npm for installing dependencies and running scripts.
 
@@ -34,8 +34,9 @@ This keeps TypeScript running in watch mode while you edit files.
 
 ## Automated Tests
 
-Safe Code has two automated test suites:
+Safe Code has three automated test suites:
 
+- Release automation tests exercise artifact provenance, workflow pins, publication guards, Marketplace propagation handling, and fail-closed GitHub draft recovery without contacting either service.
 - Unit tests exercise the VS Code-independent scanner core, including detection rules, placeholder filtering, ignored paths, offsets, ordering, and deduplication.
 - Integration tests run the extension in an isolated VS Code Extension Development Host and exercise activation, diagnostics, document events, settings, commands, and quick fixes.
 
@@ -45,13 +46,20 @@ Run the fast unit suite with:
 npm run test:unit
 ```
 
+Run the release automation suite and immutable-action verifier with:
+
+```bash
+npm run test:release
+npm run verify:workflow-pins
+```
+
 Run the extension-host integration suite with:
 
 ```bash
 npm run test:integration
 ```
 
-The first integration run downloads the pinned VS Code test version into `.vscode-test/`. Run both suites with:
+The first integration run downloads the pinned VS Code test version into `.vscode-test/`. Run all suites with:
 
 ```bash
 npm test
@@ -59,7 +67,7 @@ npm test
 
 Tests are compiled separately with `tsconfig.test.json` into `.test-out/`, so test files are not mixed into the extension's publishable `out/` directory. In VS Code, use the `Extension Tests` launch configuration to compile and debug the integration suite.
 
-GitHub Actions runs both suites for every pull request and every push to `main`. The Linux runner uses `xvfb-run` to provide the display required by the VS Code Electron integration host. Configure the `Compile and test` job as a required branch-protection check to prevent merging pull requests whose tests fail.
+GitHub Actions runs all three suites and the workflow-pin verifier for every pull request and every push to `main`. The Linux runner uses `xvfb-run` to provide the display required by the VS Code Electron integration host. Configure the `Compile and test` job as a required branch-protection check to prevent merging pull requests whose tests fail.
 
 ## Running In VS Code
 
@@ -84,6 +92,9 @@ safe-code/
 │       └── rules.md
 ├── schemas/
 │   └── safe-code.schema.json
+├── scripts/
+│   ├── release-helper.mjs
+│   └── verify-workflow-pins.mjs
 ├── src/
 │   ├── extension.ts
 │   ├── environmentFixCore.ts
@@ -97,6 +108,7 @@ safe-code/
 ├── test/
 │   ├── fixtures/
 │   ├── integration/
+│   ├── release/
 │   └── unit/
 ├── AGENT.md
 ├── package.json
@@ -353,61 +365,56 @@ To change ignore behavior, edit `src/ignoreStore.ts`.
 
 ## Release Workflow
 
-Use this workflow when preparing a new Safe Code Marketplace release from `main`.
+`.github/workflows/publish-github-release.yml` is the only supported publication path. It uses Ubuntu 24.04, Node.js 22.23.2, `@vscode/vsce` 4.0.0, and reviewed commit-SHA pins for every external action. The repository's `marketplace` GitHub environment must be configured for the `matheus-tecchio` Marketplace publisher's trusted-publishing/OIDC policy. Do not add a `VSCE_PAT` secret.
 
-1. Create a release or feature branch. Do not commit directly to `main`.
-2. Implement the requested features, fixes, or release prep.
-3. Install dependencies only when needed:
+### One-time trusted-publishing setup
 
-```bash
-npm install
-```
+1. In the GitHub repository settings, create an environment named `marketplace`. Under its deployment branches and tags, select **Selected branches and tags** and allow only `main`. This main-only rule is required because the Marketplace trust is bound to the environment; an optional required-reviewer rule can add a human approval gate.
+2. In Visual Studio Marketplace publisher management for `matheus-tecchio`, add a GitHub Actions trusted publisher.
+3. Set the owner to `matheustecchio`, repository to `safe-code`, workflow filename to `publish-github-release.yml`, and environment to `marketplace`.
+4. Keep the workflow's Marketplace job scoped to `id-token: write` and repository `contents: read`. Before enabling the trusted publisher, verify that a non-`main` deployment cannot enter the `marketplace` environment. Do not create a `VSCE_PAT` repository or environment secret.
 
-4. Compile the extension:
+### Prepare and dry-run
 
-```bash
-npm run compile
-```
+1. Create a release branch, implement the change, and update the extension version. Use `patch` for fixes or internal changes, `minor` for new user-facing features, and `major` only for breaking behavior.
+2. Run `npm test`, `npm run test:release`, and `npm run verify:workflow-pins` locally where the VS Code test host is available.
+3. Commit and push the branch, open a PR against `main`, and wait for the repository owner to merge it. Do not publish from the branch.
+4. The `Publish release` workflow runs automatically on pull requests as a credential-free dry run. A manual run with `publish` left `false` does the same. Only the `build` job runs: it installs the lockfile, executes all tests, packages once, writes provenance, and uploads a 30-day workflow artifact.
 
-5. Bump the extension version:
+The release bundle contains exactly:
 
-```bash
-npm version patch
-```
+- `safe-code-<version>.vsix`
+- `safe-code-<version>.vsix.sha256`
+- `release-manifest.json`
 
-Use `patch` for fixes, docs, or internal changes; `minor` for new user-facing features; and `major` only for breaking behavior.
+The manifest records the canonical version, extension ID, repository, workflow run ID, exact source commit, Node.js/npm/VSCE versions, VSIX filename and size, and lowercase SHA-256 digest. Bundle verification rejects missing or extra files, links, malformed metadata, or byte changes.
 
-6. Package the extension:
+### Publish
 
-```bash
-vsce package --no-dependencies
-```
+From the GitHub Actions page, run `Publish release` against `main`, set `publish` to `true`, and enter the exact `package.json` value in `expected_version`. A publication request fails when the event is not `workflow_dispatch`, the ref is not `main`, the version input is missing or differs, the checkout is not the event commit, a tool version differs, or the target version/tag/release already exists.
 
-7. Commit the release changes, push the branch, open a PR against `main`, and wait for the repository owner to merge it.
+The three jobs have deliberately separate authority:
 
-8. Update a clean local `main`, then publish only when you intentionally want to release to the Marketplace and valid publisher authentication is available:
+1. `build` runs the full tests and packages the VSIX once. It has read-only repository permission and no publication credential.
+2. `publish-marketplace` downloads and locally re-verifies the first workflow attempt's exact three-file bundle. Before publishing, it rejects any existing Git tag, any release visible to its read-scoped token, and an existing Marketplace version; refuses every workflow re-run attempt; and persists a run-and-attempt-keyed immutable audit receipt. The pinned local VSCE binary uploads the prebuilt VSIX with GitHub Actions OIDC; it never rebuilds and never uses `--skip-duplicate`.
+3. `publish-github` always downloads that original first-attempt bundle and first checks that the exact Marketplace version is visible. It then creates a draft targeted at the source SHA, uploads the VSIX, checksum, and manifest, downloads all three again to verify their bytes, and only then publishes the release as latest and confirms the tag target.
 
-```bash
-vsce publish --no-dependencies
-```
+The Marketplace signs and repackages extensions, so the public Marketplace VSIX is not expected to have the build artifact's SHA-256. The workflow proves that VSCE received the locally verified prebuilt file and checks the exact version endpoint for propagation. The original bytes remain independently verifiable through the GitHub Release assets and manifest.
 
-One-time publisher login uses:
+GitHub exposes draft releases only to callers with push access. The Marketplace job deliberately has `contents: read`, so its preflight cannot prove that no hidden draft uses the version tag. The later write-scoped GitHub job repeats the preflight, sees drafts, and refuses any draft whose source commit, run ID, provenance, or assets do not match. This preserves least privilege but can require operator recovery after Marketplace publication if an unrelated hidden draft already occupied the tag.
 
-```bash
-vsce login matheus-tecchio
-```
+### Recovery
 
-9. After the Marketplace publish succeeds, run the `Publish GitHub release` workflow from the Actions tab or with GitHub CLI:
+- If VSCE exits successfully but the version remains invisible for the full bounded 15-minute polling period, the Marketplace job records `accepted-pending-propagation` and succeeds. The GitHub job performs one visibility probe and fails before creating a draft if propagation is still pending. Once the version appears, rerun only the failed `publish-github` job from that same workflow run; it reuses the original artifact and does not invoke Marketplace publication.
+- The Marketplace helper requires workflow run attempt `1` both before creating the receipt and immediately before invoking VSCE. GitHub increments the run-attempt value for every whole-workflow or individual-job re-run, so no Marketplace job re-run can reach the publisher. The immutable receipt is uploaded immediately before VSCE as audit evidence; it is not treated as a cross-attempt lock.
+- A failed GitHub upload can leave a draft. Re-running only the failed GitHub job from the same workflow run verifies the draft's run ID, commit, version, provenance, and every completed asset, uploads only missing assets, then publishes. It never overwrites or deletes a completed asset. After exact same-run provenance validation, it may remove only an incomplete GitHub `starter` placeholder for an expected asset name before uploading the retained local file. If publication succeeded but the response was lost, the retry verifies the already-published release and completes without another write.
+- A draft from another run, a mismatched asset, an unexpected tag, or an unrelated published release fails closed. Do not edit the draft to make it pass.
+- If the write-scoped GitHub job discovers a previously hidden foreign draft after Marketplace publication, inspect its ownership and provenance. Resolve that repository-side conflict explicitly, then rerun only `publish-github` from the original workflow run; never rerun the Marketplace job or rebuild the VSIX.
+- A nonzero or ambiguous VSCE exit is a hard failure because Marketplace packages are immutable and their public bytes are re-signed. The first-attempt guard mechanically blocks a same-run publisher retry. Do not start another publication run, use `--skip-duplicate`, infer ownership from version presence, or create a GitHub Release. Stop and require a separately designed and reviewed recovery procedure; this workflow intentionally provides no automatic recovery from an ambiguous publisher result.
+- If a production run fails before VSCE is invoked, confirm that no Marketplace publication was attempted and start a fresh manual workflow run instead of re-running its Marketplace job. A pull-request or `publish: false` dry run has no publisher job and remains freely rerunnable.
+- Do not rerun the complete workflow after a partial publication. A new run ID intentionally cannot claim or overwrite the previous run's draft or artifact.
 
-```bash
-gh workflow run "Publish GitHub release" --ref main
-```
-
-The workflow verifies that the version in `package.json` exists on the Marketplace, compiles and packages the extension, creates the matching `v<version>` tag and GitHub Release, generates release notes, and attaches the VSIX. It refuses to overwrite an existing tag or release.
-
-Marketplace versions are immutable. If a version has already been published, the next release must use a new version.
-
-Safe Code currently has no runtime npm dependencies, so release commands use `--no-dependencies` to avoid local `vsce` dependency detection issues.
+The publication concurrency group never cancels an in-progress release. Dry runs use separate per-run groups so they do not block production publication.
 
 ## MVP Limitations
 
