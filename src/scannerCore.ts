@@ -19,6 +19,7 @@ export type OffsetSecretFinding = {
 export const defaultIgnoredPaths = [
   "**/node_modules/**",
   "**/.git/**",
+  "**/.env/**",
   "**/dist/**",
   "**/build/**",
   "**/coverage/**",

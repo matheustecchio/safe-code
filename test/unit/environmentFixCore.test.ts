@@ -97,11 +97,24 @@ suite("environment fix core", () => {
       upsertEnvironmentValue('API_KEY="same-secret"\n', "API_KEY", "same-secret"),
       'API_KEY="same-secret"\n'
     );
+    assert.throws(
+      () => upsertEnvironmentExample("API_KEY=\nAPI_KEY=placeholder\n", "API_KEY"),
+      EnvironmentVariableConflictError
+    );
   });
 
   test("adds an exact root environment ignore idempotently", () => {
-    assert.strictEqual(ensureEnvironmentFileIgnored("node_modules/\n"), "node_modules/\n.env\n");
-    assert.strictEqual(ensureEnvironmentFileIgnored("/.env\n"), "/.env\n");
-    assert.strictEqual(ensureEnvironmentFileIgnored(".env.*\n"), ".env.*\n.env\n");
+    const protectedRules = "/.safe-code-tmp-*\n/.env\n";
+    assert.strictEqual(ensureEnvironmentFileIgnored("node_modules/\n"), `node_modules/\n${protectedRules}`);
+    assert.strictEqual(ensureEnvironmentFileIgnored(protectedRules), protectedRules);
+    assert.strictEqual(ensureEnvironmentFileIgnored(".env.*\n"), `.env.*\n${protectedRules}`);
+    assert.strictEqual(
+      ensureEnvironmentFileIgnored("/.env\n!.env\n"),
+      `/.env\n!.env\n${protectedRules}`
+    );
+    assert.strictEqual(
+      ensureEnvironmentFileIgnored("/.env\n# trailing explanation\n"),
+      `/.env\n# trailing explanation\n${protectedRules}`
+    );
   });
 });
