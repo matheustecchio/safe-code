@@ -31,8 +31,10 @@ This repository contains Safe Code, a VS Code extension that detects suspicious 
 - Compile: `npm run compile`
 - Watch TypeScript: `npm run watch`
 - Local VS Code test from the repository root: `code --extensionDevelopmentPath="$(pwd)"`
-- Package extension: `vsce package --no-dependencies`
-- Publish extension: `vsce publish --no-dependencies`
+- Package extension with the pinned local tool: `./node_modules/.bin/vsce package --no-dependencies`
+- Test release automation: `npm run test:release`
+- Verify workflow action pins: `npm run verify:workflow-pins`
+- Publish extension: use the `Publish release` GitHub Actions workflow; do not publish locally.
 
 Run `npm test` before committing TypeScript, configuration, or test changes. This command includes the production compile, unit tests, and VS Code integration tests. For documentation-only changes, running the test suite is optional.
 
@@ -76,23 +78,24 @@ When a user asks for a new release of the VS Code extension:
 
 - Create a release or feature branch before making commits.
 - Implement the requested features, fixes, or release prep.
-- Run `npm install` only when dependencies changed or `node_modules` is missing.
-- Run `npm run compile`.
+- Run `npm ci`, `npm test`, `npm run test:release`, and `npm run verify:workflow-pins`.
 - Bump the extension version with one of:
   - `npm version patch` for fixes, docs, or internal changes.
   - `npm version minor` for new user-facing features.
   - `npm version major` only for breaking behavior.
-- Run `vsce package --no-dependencies`.
 - Commit the release changes, push the branch, and create or update a PR against `main`.
 - Do not merge the PR.
-- Wait for the repository owner to review and merge the release PR, then update a clean local `main` before publishing.
-- Run `vsce publish --no-dependencies` only when the user explicitly asks to publish and valid Visual Studio Marketplace authentication is available.
-- After a successful Marketplace publication, run the `Publish GitHub release` workflow from `main`.
-- The workflow verifies the `package.json` version exists on the Marketplace, compiles and packages the extension, tags the merged release commit as `v<version>`, creates `Safe Code <version>` with generated release notes, and attaches `safe-code-<version>.vsix`.
-- The workflow refuses to overwrite an existing version tag or GitHub Release. Use a manual release only for recovery when the workflow cannot be used.
-- Verify that the Marketplace version and GitHub Release version match and that the VSIX asset is downloadable.
+- Pull requests automatically exercise the credential-free `build` dry run. A manual `publish: false` run does the same.
+- Wait for the repository owner to review and merge the release PR. Publish only after an explicit request by manually running `Publish release` from `main` with `publish: true` and `expected_version` exactly equal to `package.json`.
+- Keep Node.js 22.23.2, `@vscode/vsce` 4.0.0, Ubuntu 24.04, and all reviewed action SHA pins unchanged unless the update itself is reviewed and tested.
+- Marketplace publication must use the `marketplace` GitHub environment and OIDC trusted publishing. Never add or use `VSCE_PAT`, `--skip-duplicate`, `gh`, or `jq` in the release path.
+- Restrict the `marketplace` environment to deployments from `main`. Require workflow run attempt `1` before invoking VSCE, persist the immutable Marketplace attempt receipt, and keep recovery on the original first-attempt artifact.
+- The workflow builds once, verifies a strict three-file bundle, uploads the prebuilt VSIX to the Marketplace, then attaches the exact same original VSIX plus its checksum and manifest to the GitHub Release.
+- Marketplace public downloads are signed/repackaged and are checked for exact version visibility, not byte equality. The GitHub asset retains the original recorded bytes.
+- If Marketplace propagation is pending, rerun only the failed `publish-github` job from the same workflow run after the version becomes visible. Same-run partial GitHub drafts are resumable; foreign or mismatched drafts, tags, releases, and assets fail closed.
+- A nonzero or ambiguous VSCE result requires explicit manual investigation. The Marketplace job must never run on a workflow re-run attempt; do not rerun the publisher or infer success from a pre-existing version.
 
-Use `--no-dependencies` for `vsce` commands because Safe Code currently has no runtime npm dependencies and this avoids local `vsce` dependency detection issues.
+See `docs/dev/development.md` for bundle contents, permissions, validation order, and recovery details.
 
 ## Safety Rules
 
