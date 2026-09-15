@@ -244,6 +244,50 @@ suite("Safe Code extension", () => {
     assert.deepStrictEqual(projectConfigAfterLocalIgnore, projectConfigBeforeLocalIgnore);
   });
 
+  test("serializes simultaneous project-ignore updates without losing entries", async () => {
+    const firstLine = 'const apiKey = "first-simultaneous-project-secret";';
+    const secondLine = 'const token = "second-simultaneous-project-secret";';
+    const firstUri = await createWorkspaceFile("simultaneous-first.ts", firstLine);
+    const secondUri = await createWorkspaceFile("simultaneous-second.ts", secondLine);
+    const [firstDiagnostics, secondDiagnostics] = await Promise.all([
+      eventually(() => getSafeCodeDiagnostics(firstUri), (items) => items.length === 1),
+      eventually(() => getSafeCodeDiagnostics(secondUri), (items) => items.length === 1)
+    ]);
+
+    await Promise.all([
+      vscode.commands.executeCommand(
+        "safeCode.ignoreWarningForProject",
+        firstUri,
+        firstDiagnostics[0].range.start.line,
+        firstDiagnostics[0].code
+      ),
+      vscode.commands.executeCommand(
+        "safeCode.ignoreWarningForProject",
+        secondUri,
+        secondDiagnostics[0].range.start.line,
+        secondDiagnostics[0].code
+      )
+    ]);
+
+    const parsedConfig = JSON.parse(await readWorkspaceText(projectConfigUri));
+    assert.deepStrictEqual(parsedConfig.ignoredWarnings, [
+      {
+        filePath: getWorkspaceRelativePath(firstUri),
+        lineHash: hashLineText(firstLine),
+        ruleId: "generic-secret-assignment"
+      },
+      {
+        filePath: getWorkspaceRelativePath(secondUri),
+        lineHash: hashLineText(secondLine),
+        ruleId: "generic-secret-assignment"
+      }
+    ]);
+    await eventually(
+      () => [getSafeCodeDiagnostics(firstUri), getSafeCodeDiagnostics(secondUri)],
+      (diagnostics) => diagnostics.every((items) => items.length === 0)
+    );
+  });
+
   test("keeps warnings active and preserves invalid project configuration", async () => {
     const invalidConfig = Buffer.from('{"version":1,"ignoredWarnings":[{"filePath":"../outside.ts"}]}');
     await vscode.workspace.fs.writeFile(projectConfigUri, invalidConfig);

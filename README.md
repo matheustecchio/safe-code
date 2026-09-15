@@ -74,6 +74,8 @@ Each entry matches the workspace-relative file path, the first 24 hexadecimal ch
 
 Safe Code reloads this file when it is created, changed, or deleted. Invalid configuration is reported in the **Safe Code** output channel and suppresses no warnings. The project quick fix will not overwrite an invalid file.
 
+For safety, `.safe-code.json` must be either missing or a regular file. Safe Code refuses symbolic links, directories, and other filesystem entry types, and it never follows a link to read or update project ignores. A missing configuration is created exclusively; an existing valid configuration is revalidated against the exact bytes and file identity that were read before it is replaced atomically. If the path or contents change during the operation, the update stops and the in-memory project ignores fail closed.
+
 ## Documentation
 
 - [Documentation index](./docs/README.md)
