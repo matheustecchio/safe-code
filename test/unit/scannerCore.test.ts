@@ -73,11 +73,38 @@ suite("scanner core", () => {
   });
 
   test("accepts supported extensions and environment-file variants", () => {
-    for (const fileName of ["source.ts", "component.TSX", "config.yaml", ".env", ".env.local"]) {
+    for (const fileName of [
+      "source.ts",
+      "component.TSX",
+      "config.yaml",
+      ".env",
+      ".env.local",
+      ".env.production",
+      ".env-config.ts"
+    ]) {
       assert.strictEqual(shouldScanFile(fileName, fileName, defaultIgnoredPaths), true, fileName);
     }
 
     assert.strictEqual(shouldScanFile("notes.txt", "notes.txt", defaultIgnoredPaths), false);
+  });
+
+  test("ignores only directories named exactly .env at any workspace depth", () => {
+    for (const relativePath of [
+      ".env/secret.ts",
+      "nested/.env/secret.ts",
+      "nested\\.env\\secret.ts"
+    ]) {
+      assert.strictEqual(shouldScanFile("secret.ts", relativePath, defaultIgnoredPaths), false, relativePath);
+    }
+
+    for (const relativePath of [
+      ".env-config.ts",
+      ".env.local/secret.ts",
+      "nested/.env-config/secret.ts",
+      "nested/my.env/secret.ts"
+    ]) {
+      assert.strictEqual(shouldScanFile("secret.ts", relativePath, defaultIgnoredPaths), true, relativePath);
+    }
   });
 
   test("honors default and custom ignored globs with normalized separators", () => {
