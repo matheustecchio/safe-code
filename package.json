@@ -74,6 +74,24 @@
           "minimum": 8,
           "description": "Minimum value length for generic secret assignment warnings."
         },
+        "safeCode.maxFileSizeBytes": {
+          "type": "integer",
+          "default": 1048576,
+          "minimum": 1,
+          "description": "Maximum UTF-8 byte size of an individual file that Safe Code will scan."
+        },
+        "safeCode.maxWorkspaceScanFiles": {
+          "type": "integer",
+          "default": 10000,
+          "minimum": 1,
+          "description": "Maximum number of supported files considered by one full workspace scan."
+        },
+        "safeCode.maxWorkspaceScanBytes": {
+          "type": "integer",
+          "default": 104857600,
+          "minimum": 1,
+          "description": "Maximum total UTF-8 bytes scanned by one full workspace scan."
+        },
         "safeCode.ignoredPaths": {
           "type": "array",
           "default": [
@@ -105,6 +123,7 @@
     "test:unit": "npm run compile:tests && mocha --ui tdd --timeout 5000 \".test-out/test/unit/**/*.test.js\"",
     "test:integration": "npm run compile:all && vscode-test --label integration",
     "verify:workflow-pins": "node scripts/verify-workflow-pins.mjs"
+    "benchmark:workspace-scan": "npm run compile:tests && node --expose-gc test/benchmark/workspaceScanBenchmark.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

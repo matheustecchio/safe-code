@@ -36,9 +36,8 @@ This keeps TypeScript running in watch mode while you edit files.
 
 Safe Code has three automated test suites:
 
-- Release automation tests exercise artifact provenance, workflow pins, publication guards, Marketplace propagation handling, and fail-closed GitHub draft recovery without contacting either service.
-- Unit tests exercise the VS Code-independent scanner core, including detection rules, placeholder filtering, ignored paths, offsets, ordering, and deduplication.
-- Integration tests run the extension in an isolated VS Code Extension Development Host and exercise activation, diagnostics, document events, settings, commands, and quick fixes.
+- Unit tests exercise the VS Code-independent scanner and workspace-work cores, including detection rules, resource budgets, bounded queueing, cleanup policy, placeholder filtering, ignored paths, offsets, ordering, and deduplication.
+- Integration tests run the extension in an isolated VS Code Extension Development Host and exercise activation, diagnostics, document events, scan size limits, partial workspace budgets, settings, commands, and quick fixes.
 
 Run the fast unit suite with:
 
@@ -68,6 +67,15 @@ npm test
 Tests are compiled separately with `tsconfig.test.json` into `.test-out/`, so test files are not mixed into the extension's publishable `out/` directory. In VS Code, use the `Extension Tests` launch configuration to compile and debug the integration suite.
 
 GitHub Actions runs all three suites and the workflow-pin verifier for every pull request and every push to `main`. The Linux runner uses `xvfb-run` to provide the display required by the VS Code Electron integration host. Configure the `Compile and test` job as a required branch-protection check to prevent merging pull requests whose tests fail.
+Run the repeatable in-memory workspace-scan benchmark with:
+
+```bash
+npm run benchmark:workspace-scan
+```
+
+The benchmark warms up the Node-only core, requests garbage collection, then processes 10,000 deterministic, in-memory file records through supported-path filtering, UTF-8 sizing, budget admission, secret matching, and the bounded event queue. It intentionally excludes physical filesystem and VS Code host startup variability. The one-line JSON result includes queue peak and overflow, accepted files and bytes, findings, elapsed time, and heap growth. The command fails if the measured body takes 10 seconds or more or grows the heap by 128 MiB or more; these deliberately broad envelopes catch runaway work or retention without acting as machine-specific performance targets.
+
+GitHub Actions runs both suites for every pull request and every push to `main`. The Linux runner uses `xvfb-run` to provide the display required by the VS Code Electron integration host. Configure the `Compile and test` job as a required branch-protection check to prevent merging pull requests whose tests fail.
 
 ## Running In VS Code
 
@@ -101,11 +109,14 @@ safe-code/
 │   ├── environmentStore.ts
 │   ├── ignoreCore.ts
 │   ├── ignoreStore.ts
+│   ├── projectIgnoreFile.ts
 │   ├── projectIgnoreStore.ts
 │   ├── rules.ts
 │   ├── scannerCore.ts
-│   └── scanner.ts
+│   ├── scanner.ts
+│   └── workspaceScanCore.ts
 ├── test/
+│   ├── benchmark/
 │   ├── fixtures/
 │   ├── integration/
 │   ├── release/
@@ -126,8 +137,10 @@ safe-code/
 | `src/environmentFixCore.ts` | Parses unambiguous assignments, infers environment names, and safely updates environment-file text without importing VS Code. |
 | `src/environmentStore.ts` | Refuses unsafe environment-file targets, checks Git tracking, and writes `.gitignore`, `.env`, and `.env.example` in safety order. |
 | `src/ignoreCore.ts` | Contains VS Code-independent ignore identity, validation, parsing, and serialization logic. |
+| `src/projectIgnoreFile.ts` | Performs no-follow reads, stable snapshot validation, and atomic Node filesystem updates for `.safe-code.json`. |
 | `src/scanner.ts` | Decides which documents can be scanned and turns regex matches into `SecretFinding` objects. |
 | `src/scannerCore.ts` | Contains VS Code-independent file filtering and text scanning logic. |
+| `src/workspaceScanCore.ts` | Contains VS Code-independent scan budgets, UTF-8 sizing, bounded queueing, active scan guards, and cleanup policy. |
 | `src/rules.ts` | Defines the secret detection rules and their messages. |
 | `src/ignoreStore.ts` | Stores and checks locally ignored warnings. |
 | `src/projectIgnoreStore.ts` | Loads, matches, and explicitly updates `.safe-code.json` for each workspace folder. |
@@ -141,7 +154,7 @@ safe-code/
 2. The extension creates a diagnostic collection named `safe-code`.
 3. The extension creates a local `IgnoreStore` and loads project ignores from each workspace folder.
 4. The extension registers document, workspace, configuration, command, and quick-fix handlers.
-5. Safe Code scans the workspace after activation when `safeCode.scanWorkspaceOnStartup` is enabled, then watches supported workspace files for later creates, changes, and deletes. Document edits and file events are debounced.
+5. Safe Code scans the workspace after activation when `safeCode.scanWorkspaceOnStartup` is enabled, then watches supported workspace files for later creates, changes, and deletes. Eligible document edits and file events enter one bounded, debounced queue.
 6. The scanner checks whether the document should be scanned.
 7. The scanner core applies each rule from `src/rules.ts` to the document text.
 8. Findings that are not ignored are converted into VS Code diagnostics.
@@ -176,9 +189,9 @@ The activation function is `activate(context)` in `src/extension.ts`.
 
 ## Debounced Scanning
 
-`queueScan(document)` and `queueUriScan(uri)` wait 250ms before scanning. If the same resource changes again before the timer fires, the old timer is cancelled.
+`queueScan(document)` and `queueUriScan(uri)` reject unsupported or ignored paths before queueing. Eligible work is coalesced by URI in one queue capped at 256 entries. A single 250ms timer starts one sequential drain, so filesystem bursts cannot create one timer or promise per path and a continuous burst cannot postpone the first drain by resetting the timer.
 
-This avoids rescanning on every keystroke while the user is typing quickly.
+If more than 256 distinct resources arrive, later resources are dropped from that batch and one overflow flag is retained. After the drain, the flag requests at most one silent full workspace rescan; another overflow episode during that recovery is coalesced into one follow-up. Active URI guards prevent a deleted or superseded in-flight read from publishing stale diagnostics, and guard state is released after each job instead of retaining a lifetime path history.
 
 ## Document Filtering
 
@@ -200,17 +213,19 @@ These defaults are always combined with user-configured ignore patterns so depen
 
 When `safeCode.scanWorkspaceOnStartup` is enabled, activation performs a quiet workspace scan with status-bar progress. The `safeCode.scanWorkspace` command runs the same scan manually with a cancellable notification and is contributed to the Command Palette, editor-tab context menu, and Explorer context menu.
 
-Workspace scanning uses `vscode.workspace.findFiles` to discover files only within the currently open workspace folders. Built-in and configured ignore globs are passed to discovery so excluded directory trees are not traversed, and `shouldScanUri` applies the scanner's supported-file checks before a document is opened.
+Workspace scanning uses a supported-file-only glob with `vscode.workspace.findFiles` and discovers at most `safeCode.maxWorkspaceScanFiles + 1` paths. The extra result is a truncation sentinel. Built-in and configured ignore globs are mandatory discovery exclusions, and `shouldScanUri` still applies the scanner's eligibility checks before a document is opened.
 
-The command reloads project ignore configuration, displays a cancellable progress notification, opens each eligible file with the VS Code workspace API, and sends it through the same `scanDocument`, combined ignore-store, and diagnostic pipeline used for open files. An unreadable or concurrently deleted file is logged and skipped without stopping the remaining scan.
+Before opening a closed file, the scan checks `vscode.workspace.fs.stat(uri).size` against `safeCode.maxFileSizeBytes` and the remaining workspace byte budget. Open and dirty documents are measured from their current UTF-8 text. The adapter remeasures every opened document before running detection, accepts exact limits, and removes stale diagnostics when a file is oversized. An unreadable, concurrently changed, or deleted file is counted or skipped without stopping later candidates.
+
+`WorkspaceScanBudget` limits successfully scanned files and UTF-8 bytes to `safeCode.maxWorkspaceScanFiles` and `safeCode.maxWorkspaceScanBytes`. Reaching a file or byte budget produces a partial result. Manual scans show one aggregate notification; automatic scans and file-event batches write aggregate counts to the Safe Code output channel without per-file notifications.
 
 Only one workspace scan runs at a time. A project configuration change during a scan requests one follow-up scan so the new ignore state is not lost.
 
-Diagnostic URIs are tracked independently of editor tabs, so Problems entries survive document-close events regardless of whether they came from an automatic, manual, or open-file scan. A completed workspace rescan and file-deletion events remove stale entries. Cancelling a manual scan keeps diagnostics produced for files already processed.
+Diagnostic URIs are tracked independently of editor tabs, so Problems entries survive document-close events regardless of whether they came from an automatic, manual, or open-file scan. Only a complete, non-cancelled workspace scan performs global stale cleanup. Cancellation or a resource-truncated scan keeps processed results and leaves unvisited diagnostics unchanged; file deletion and per-file oversized decisions still remove their own stale entries.
 
 ## Scanning
 
-`scanDocument(document, options)` reads the full document text and delegates matching to `scanText(text, options)` in `src/scannerCore.ts`. The core applies every rule from `secretRules` and returns findings with text offsets; the VS Code adapter converts those offsets into `vscode.Range` objects.
+`scanDocument(document, options)` reads the current document text once, measures its UTF-8 bytes, stops before regex matching when a file or remaining byte limit would be exceeded, and otherwise delegates to `scanText(text, options)` in `src/scannerCore.ts`. The core applies every rule from `secretRules` and returns findings with text offsets; the VS Code adapter converts those offsets into `vscode.Range` objects.
 
 For each regex match, the scanner:
 
@@ -252,7 +267,7 @@ When VS Code asks for code actions, the provider:
 4. Creates `Safe Code: Ignore this warning for this project` for shared configuration.
 5. Passes the file URI, diagnostic range, and rule ID to the selected internal command.
 
-Both ignore commands open the document, read the current line text, store the ignore entry, and rescan the document. The local action never changes project files. The project action is the only path that writes `.safe-code.json`; it refuses to overwrite malformed configuration.
+Both ignore commands open the document, read the current line text, store the ignore entry, and rescan the document. The local action never changes project files. The project action is the only path that writes `.safe-code.json`; it refuses to overwrite malformed or unsafe configuration targets. Project reads, reloads, and writes are serialized per workspace folder so watcher activity and simultaneous quick fixes cannot lose an update or restore stale cached ignores.
 
 ### Move to `.env`
 
@@ -269,7 +284,7 @@ The command refuses symbolic links and uses `git ls-files` to refuse a `.env` al
 
 ## Ignore Storage
 
-Shared identity and validation logic lives in `src/ignoreCore.ts`. Local storage lives in `src/ignoreStore.ts`, and project configuration access lives in `src/projectIgnoreStore.ts`.
+Shared identity and validation logic lives in `src/ignoreCore.ts`. Local storage lives in `src/ignoreStore.ts`, the Node-only safe file layer lives in `src/projectIgnoreFile.ts`, and the VS Code project adapter lives in `src/projectIgnoreStore.ts`.
 
 An ignored warning has this shape:
 
@@ -306,7 +321,9 @@ Project warnings use a POSIX-style path relative to the workspace folder contain
 
 The parser validates the entire file before accepting any entry. Invalid JSON, unsupported versions, unexpected properties, malformed hashes, empty rule IDs, absolute paths, and parent-directory traversal reject the full project ignore set. Safe Code logs the error to its output channel and keeps warnings active. Duplicate valid entries are collapsed in memory.
 
-The project quick fix creates a missing configuration or appends and sorts an entry in a valid one. File-system watcher events reload configuration created or edited outside Safe Code. `package.json` associates the configuration file with `schemas/safe-code.schema.json` for editor validation.
+The file layer inspects `.safe-code.json` without following symbolic links, reads regular files through an opened descriptor, and checks the descriptor and path identity before accepting a stable byte snapshot. Symbolic links, directories, other non-regular entries, non-file workspace URIs, and concurrent changes are rejected with fixed messages that do not include configuration contents or parser details.
+
+The project quick fix creates a missing configuration with an exclusive final-path open. For an existing valid file, it writes an exclusively created sibling temporary file, preserves the existing permission mode, revalidates the original identity and exact bytes, and atomically renames the temporary file into place. A post-write check must succeed before the in-memory ignore cache is updated. On any read, validation, or write failure, cached project ignores for that workspace are removed so warnings remain active. File-system watcher events reload configuration created or edited outside Safe Code. `package.json` associates the configuration file with `schemas/safe-code.schema.json` for editor validation.
 
 ## Settings
 
@@ -317,7 +334,12 @@ Current settings are:
 - `safeCode.enabled` enables or disables diagnostics.
 - `safeCode.scanWorkspaceOnStartup` controls whether activation performs a full workspace scan. It defaults to `true`.
 - `safeCode.minimumSecretLength` controls the minimum value length for generic secret assignment rules.
+- `safeCode.maxFileSizeBytes` controls the maximum UTF-8 bytes scanned from one file. It defaults to 1,048,576 (1 MiB).
+- `safeCode.maxWorkspaceScanFiles` controls how many supported files one full scan considers. It defaults to 10,000.
+- `safeCode.maxWorkspaceScanBytes` controls the aggregate UTF-8 byte budget for a full scan. It defaults to 104,857,600 (100 MiB).
 - `safeCode.ignoredPaths` controls workspace-relative glob patterns that Safe Code skips.
+
+The three resource settings accept positive integers. Invalid runtime values fall back to their defaults. Exact limits are inclusive.
 
 ## Manual Test Cases
 
