@@ -122,7 +122,7 @@
     "test:release": "node --test test/release/*.test.mjs",
     "test:unit": "npm run compile:tests && mocha --ui tdd --timeout 5000 \".test-out/test/unit/**/*.test.js\"",
     "test:integration": "npm run compile:all && vscode-test --label integration",
-    "verify:workflow-pins": "node scripts/verify-workflow-pins.mjs"
+    "verify:workflow-pins": "node scripts/verify-workflow-pins.mjs",
     "benchmark:workspace-scan": "npm run compile:tests && node --expose-gc test/benchmark/workspaceScanBenchmark.js"
   },
   "devDependencies": {
