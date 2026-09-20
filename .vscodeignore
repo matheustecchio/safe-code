@@ -7,6 +7,7 @@
 AGENT.md
 CLAUDE.md
 docs/**
+scripts/**
 test/**
 node_modules/**
 src/**
