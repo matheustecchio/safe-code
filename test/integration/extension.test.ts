@@ -3,7 +3,13 @@ import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
+import type { WorkspaceScanResult } from "../../src/extension";
 import { hashLineText } from "../../src/ignoreCore";
+import {
+  DEFAULT_MAX_FILE_SIZE_BYTES,
+  DEFAULT_MAX_WORKSPACE_SCAN_BYTES,
+  DEFAULT_MAX_WORKSPACE_SCAN_FILES
+} from "../../src/workspaceScanCore";
 
 const extensionId = "matheus-tecchio.safe-code";
 const runtimeDirectoryName = "runtime";
@@ -49,6 +55,17 @@ suite("Safe Code extension", () => {
     await configuration.update("enabled", true, vscode.ConfigurationTarget.Global);
     await configuration.update("scanWorkspaceOnStartup", false, vscode.ConfigurationTarget.Global);
     await configuration.update("minimumSecretLength", 8, vscode.ConfigurationTarget.Global);
+    await configuration.update("maxFileSizeBytes", DEFAULT_MAX_FILE_SIZE_BYTES, vscode.ConfigurationTarget.Global);
+    await configuration.update(
+      "maxWorkspaceScanFiles",
+      DEFAULT_MAX_WORKSPACE_SCAN_FILES,
+      vscode.ConfigurationTarget.Global
+    );
+    await configuration.update(
+      "maxWorkspaceScanBytes",
+      DEFAULT_MAX_WORKSPACE_SCAN_BYTES,
+      vscode.ConfigurationTarget.Global
+    );
     await configuration.update("ignoredPaths", defaultIgnoredPaths, vscode.ConfigurationTarget.Global);
   });
 
@@ -70,6 +87,9 @@ suite("Safe Code extension", () => {
     await configuration.update("enabled", undefined, vscode.ConfigurationTarget.Global);
     await configuration.update("scanWorkspaceOnStartup", undefined, vscode.ConfigurationTarget.Global);
     await configuration.update("minimumSecretLength", undefined, vscode.ConfigurationTarget.Global);
+    await configuration.update("maxFileSizeBytes", undefined, vscode.ConfigurationTarget.Global);
+    await configuration.update("maxWorkspaceScanFiles", undefined, vscode.ConfigurationTarget.Global);
+    await configuration.update("maxWorkspaceScanBytes", undefined, vscode.ConfigurationTarget.Global);
     await configuration.update("ignoredPaths", undefined, vscode.ConfigurationTarget.Global);
     await vscode.workspace.fs.delete(runtimeDirectory, { recursive: true, useTrash: false });
   });
@@ -138,10 +158,157 @@ suite("Safe Code extension", () => {
     assert.strictEqual(getSafeCodeDiagnostics(uri).length, 1);
   });
 
+  test("skips an oversized closed file before opening it", async () => {
+    const configuration = vscode.workspace.getConfiguration("safeCode");
+    await configuration.update("enabled", false, vscode.ConfigurationTarget.Global);
+    const content = 'const apiKey = "oversized-workspace-secret";';
+    const uri = await createWorkspaceFile("oversized.ts", content);
+    assert.strictEqual(isDocumentOpen(uri), false);
+
+    await configuration.update("maxFileSizeBytes", Buffer.byteLength(content) - 1, vscode.ConfigurationTarget.Global);
+    await configuration.update("enabled", true, vscode.ConfigurationTarget.Global);
+    const result = await vscode.commands.executeCommand<WorkspaceScanResult>("safeCode.scanWorkspace");
+
+    assert.ok(result);
+    assert.strictEqual(result.oversizedFiles, 1);
+    assert.strictEqual(result.scannedFiles, 0);
+    assert.strictEqual(result.scannedBytes, 0);
+    assert.strictEqual(result.partial, false);
+    assert.strictEqual(isDocumentOpen(uri), false);
+    assert.deepStrictEqual(getSafeCodeDiagnostics(uri), []);
+  });
+
+  test("accepts a closed file exactly at the configured byte limit", async () => {
+    const configuration = vscode.workspace.getConfiguration("safeCode");
+    await configuration.update("enabled", false, vscode.ConfigurationTarget.Global);
+    const content = 'const apiKey = "exact-byte-limit-secret";';
+    const byteLength = Buffer.byteLength(content);
+    const uri = await createWorkspaceFile("exact-limit.ts", content);
+    assert.strictEqual(isDocumentOpen(uri), false);
+
+    await configuration.update("maxFileSizeBytes", byteLength, vscode.ConfigurationTarget.Global);
+    await configuration.update("enabled", true, vscode.ConfigurationTarget.Global);
+    const result = await vscode.commands.executeCommand<WorkspaceScanResult>("safeCode.scanWorkspace");
+
+    assert.ok(result);
+    assert.strictEqual(result.oversizedFiles, 0);
+    assert.strictEqual(result.scannedFiles, 1);
+    assert.strictEqual(result.scannedBytes, byteLength);
+    assert.strictEqual(result.partial, false);
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+  });
+
+  test("uses current UTF-8 bytes for an open dirty document", async () => {
+    const configuration = vscode.workspace.getConfiguration("safeCode");
+    await configuration.update("enabled", false, vscode.ConfigurationTarget.Global);
+    const uri = await createWorkspaceFile("dirty-size.ts", "x".repeat(4096));
+    const document = await vscode.workspace.openTextDocument(uri);
+    const editor = await vscode.window.showTextDocument(document);
+    const dirtyContent = 'const apiKey = "dirty-é-secret-value";';
+    const dirtyByteLength = Buffer.byteLength(dirtyContent, "utf8");
+    assert.ok(
+      await editor.edit((builder) => {
+        builder.replace(
+          new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)),
+          dirtyContent
+        );
+      })
+    );
+    assert.strictEqual(document.isDirty, true);
+    assert.ok((await vscode.workspace.fs.stat(uri)).size > dirtyByteLength);
+
+    await configuration.update("maxFileSizeBytes", dirtyByteLength, vscode.ConfigurationTarget.Global);
+    await configuration.update("enabled", true, vscode.ConfigurationTarget.Global);
+    const result = await vscode.commands.executeCommand<WorkspaceScanResult>("safeCode.scanWorkspace");
+
+    assert.ok(result);
+    assert.strictEqual(result.oversizedFiles, 0);
+    assert.strictEqual(result.scannedFiles, 1);
+    assert.strictEqual(result.scannedBytes, dirtyByteLength);
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+    await document.save();
+  });
+
+  test("discovers uppercase supported files and environment variants", async () => {
+    const configuration = vscode.workspace.getConfiguration("safeCode");
+    await configuration.update("enabled", false, vscode.ConfigurationTarget.Global);
+    const typescriptUri = await createWorkspaceFileWithExactBaseName(
+      "UPPER.TS",
+      'const apiKey = "uppercase-typescript-secret";'
+    );
+    const environmentVariantUri = await createWorkspaceFileWithExactBaseName(
+      ".ENV.local",
+      "API_TOKEN=uppercase-environment-secret"
+    );
+
+    await configuration.update("enabled", true, vscode.ConfigurationTarget.Global);
+    const result = await vscode.commands.executeCommand<WorkspaceScanResult>("safeCode.scanWorkspace");
+
+    assert.ok(result);
+    assert.strictEqual(result.scannedFiles, 2);
+    await eventually(() => getSafeCodeDiagnostics(typescriptUri), (items) => items.length === 1);
+    await eventually(() => getSafeCodeDiagnostics(environmentVariantUri), (items) => items.length === 1);
+  });
+
+  test("returns a partial result when the workspace file budget is reached", async () => {
+    const configuration = vscode.workspace.getConfiguration("safeCode");
+    await configuration.update("enabled", false, vscode.ConfigurationTarget.Global);
+    await createWorkspaceFile("file-limit-a.ts", 'const apiKey = "first-file-limit-secret";');
+    await createWorkspaceFile("file-limit-b.ts", 'const apiKey = "second-file-limit-secret";');
+
+    await configuration.update("maxWorkspaceScanFiles", 1, vscode.ConfigurationTarget.Global);
+    await configuration.update("enabled", true, vscode.ConfigurationTarget.Global);
+    const result = await vscode.commands.executeCommand<WorkspaceScanResult>("safeCode.scanWorkspace");
+
+    assert.ok(result);
+    assert.strictEqual(result.partial, true);
+    assert.strictEqual(result.partialReason, "file-limit");
+    assert.strictEqual(result.scannedFiles, 1);
+  });
+
+  test("returns a partial result when the workspace byte budget is reached", async () => {
+    const configuration = vscode.workspace.getConfiguration("safeCode");
+    await configuration.update("enabled", false, vscode.ConfigurationTarget.Global);
+    const content = 'const apiKey = "equal-sized-byte-budget-secret";';
+    const byteLength = Buffer.byteLength(content);
+    await createWorkspaceFile("byte-limit-a.ts", content);
+    await createWorkspaceFile("byte-limit-b.ts", content);
+
+    await configuration.update("maxWorkspaceScanBytes", byteLength, vscode.ConfigurationTarget.Global);
+    await configuration.update("enabled", true, vscode.ConfigurationTarget.Global);
+    const result = await vscode.commands.executeCommand<WorkspaceScanResult>("safeCode.scanWorkspace");
+
+    assert.ok(result);
+    assert.strictEqual(result.partial, true);
+    assert.strictEqual(result.partialReason, "byte-limit");
+    assert.strictEqual(result.scannedFiles, 1);
+    assert.strictEqual(result.scannedBytes, byteLength);
+  });
+
+  test("removes a stale diagnostic when a file grows above the byte limit", async () => {
+    const maximumBytes = 64;
+    const initialContent = 'const apiKey = "initial-size-secret";';
+    const uri = await createWorkspaceFile("grows-oversized.ts", initialContent);
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+
+    const configuration = vscode.workspace.getConfiguration("safeCode");
+    await configuration.update("maxFileSizeBytes", maximumBytes, vscode.ConfigurationTarget.Global);
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+
+    const prefix = 'const apiKey = "';
+    const suffix = '";';
+    const oversizedContent = `${prefix}${"x".repeat(maximumBytes + 1 - Buffer.byteLength(prefix + suffix))}${suffix}`;
+    assert.strictEqual(Buffer.byteLength(oversizedContent), maximumBytes + 1);
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(oversizedContent));
+
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 0);
+  });
+
   test("workspace scan honors default and custom ignored paths", async () => {
     const dependencyUri = await createWorkspaceFile(
       "node_modules/example/dependency.ts",
-      'const apiKey = "dependency-secret-value";'
+      'const apiKey = "dependency-secret-value";',
+      { waitForCreateEvent: false }
     );
     const generatedUri = await createWorkspaceFile(
       "generated/output.ts",
@@ -404,6 +571,50 @@ suite("Safe Code extension", () => {
     assert.deepStrictEqual(projectConfigAfterLocalIgnore, projectConfigBeforeLocalIgnore);
   });
 
+  test("serializes simultaneous project-ignore updates without losing entries", async () => {
+    const firstLine = 'const apiKey = "first-simultaneous-project-secret";';
+    const secondLine = 'const token = "second-simultaneous-project-secret";';
+    const firstUri = await createWorkspaceFile("simultaneous-first.ts", firstLine);
+    const secondUri = await createWorkspaceFile("simultaneous-second.ts", secondLine);
+    const [firstDiagnostics, secondDiagnostics] = await Promise.all([
+      eventually(() => getSafeCodeDiagnostics(firstUri), (items) => items.length === 1),
+      eventually(() => getSafeCodeDiagnostics(secondUri), (items) => items.length === 1)
+    ]);
+
+    await Promise.all([
+      vscode.commands.executeCommand(
+        "safeCode.ignoreWarningForProject",
+        firstUri,
+        firstDiagnostics[0].range.start.line,
+        firstDiagnostics[0].code
+      ),
+      vscode.commands.executeCommand(
+        "safeCode.ignoreWarningForProject",
+        secondUri,
+        secondDiagnostics[0].range.start.line,
+        secondDiagnostics[0].code
+      )
+    ]);
+
+    const parsedConfig = JSON.parse(await readWorkspaceText(projectConfigUri));
+    assert.deepStrictEqual(parsedConfig.ignoredWarnings, [
+      {
+        filePath: getWorkspaceRelativePath(firstUri),
+        lineHash: hashLineText(firstLine),
+        ruleId: "generic-secret-assignment"
+      },
+      {
+        filePath: getWorkspaceRelativePath(secondUri),
+        lineHash: hashLineText(secondLine),
+        ruleId: "generic-secret-assignment"
+      }
+    ]);
+    await eventually(
+      () => [getSafeCodeDiagnostics(firstUri), getSafeCodeDiagnostics(secondUri)],
+      (diagnostics) => diagnostics.every((items) => items.length === 0)
+    );
+  });
+
   test("keeps warnings active and preserves invalid project configuration", async () => {
     const invalidConfig = Buffer.from('{"version":1,"ignoredWarnings":[{"filePath":"../outside.ts"}]}');
     await vscode.workspace.fs.writeFile(projectConfigUri, invalidConfig);
@@ -648,7 +859,11 @@ suite("Safe Code extension", () => {
     }
   });
 
-  async function createWorkspaceFile(fileName: string, content: string): Promise<vscode.Uri> {
+  async function createWorkspaceFile(
+    fileName: string,
+    content: string,
+    options: { waitForCreateEvent?: boolean } = {}
+  ): Promise<vscode.Uri> {
     const relativeDirectory = path.posix.dirname(fileName);
     const uniqueFileName = `${Date.now()}-${path.posix.basename(fileName)}`;
     const uri =
@@ -657,7 +872,11 @@ suite("Safe Code extension", () => {
         : vscode.Uri.joinPath(runtimeDirectory, relativeDirectory, uniqueFileName);
     const parentUri = vscode.Uri.file(path.dirname(uri.fsPath));
     await vscode.workspace.fs.createDirectory(parentUri);
-    await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
+    if (options.waitForCreateEvent !== false) {
+      await writeWorkspaceFileAndWaitForCreate(uri, content);
+    } else {
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
+    }
     createdWorkspaceFiles.push(uri);
     return uri;
   }
@@ -670,6 +889,41 @@ suite("Safe Code extension", () => {
     await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
     createdWorkspaceFiles.push(uri);
     return uri;
+  }
+
+  async function createWorkspaceFileWithExactBaseName(fileName: string, content: string): Promise<vscode.Uri> {
+    const uniqueDirectory = vscode.Uri.joinPath(runtimeDirectory, `exact-${Date.now()}-${createdWorkspaceFiles.length}`);
+    await vscode.workspace.fs.createDirectory(uniqueDirectory);
+    const uri = vscode.Uri.joinPath(uniqueDirectory, fileName);
+    await writeWorkspaceFileAndWaitForCreate(uri, content);
+    createdWorkspaceFiles.push(uri);
+    return uri;
+  }
+
+  async function writeWorkspaceFileAndWaitForCreate(uri: vscode.Uri, content: string): Promise<void> {
+    const relativePath = getWorkspaceRelativePath(uri);
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(workspaceRoot, relativePath)
+    );
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const observed = new Promise<void>((resolve, reject) => {
+      watcher.onDidCreate((createdUri) => {
+        if (createdUri.toString() === uri.toString()) {
+          resolve();
+        }
+      });
+      timeout = setTimeout(() => reject(new Error(`File creation was not observed for ${relativePath}`)), 5_000);
+    });
+
+    try {
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
+      await observed;
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      watcher.dispose();
+    }
   }
 
   async function writeProjectConfig(ignoredWarnings: Array<Record<string, string>>): Promise<void> {
@@ -686,6 +940,10 @@ suite("Safe Code extension", () => {
 
 function getSafeCodeDiagnostics(uri: vscode.Uri): vscode.Diagnostic[] {
   return vscode.languages.getDiagnostics(uri).filter((diagnostic) => diagnostic.source === "Safe Code");
+}
+
+function isDocumentOpen(uri: vscode.Uri): boolean {
+  return vscode.workspace.textDocuments.some((document) => document.uri.toString() === uri.toString());
 }
 
 async function deleteIfExists(uri: vscode.Uri): Promise<void> {

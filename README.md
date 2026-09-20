@@ -29,7 +29,7 @@ Safe Code ignores common placeholder values such as `example`, `sample`, `test`,
 ## Commands
 
 - `Safe Code: Scan Open Files` rescans currently open workspace files.
-- `Safe Code: Scan Workspace` scans every supported file in the current workspace and reports findings from both open and unopened files in the Problems tab. The scan shows cancellable progress and keeps results that were processed before cancellation.
+- `Safe Code: Scan Workspace` scans supported files in the current workspace within the configured file and byte budgets, then reports findings from both open and unopened files in the Problems tab. The scan shows cancellable progress and keeps results that were processed before cancellation or a partial scan.
 
 `Safe Code: Scan Workspace` is also available by right-clicking an editor tab or a file in the Explorer.
 
@@ -74,6 +74,13 @@ Each entry matches the workspace-relative file path, the first 24 hexadecimal ch
 
 Safe Code reloads this file when it is created, changed, or deleted. Invalid configuration is reported in the **Safe Code** output channel and suppresses no warnings. The project quick fix will not overwrite an invalid file.
 
+## Release integrity
+
+The release workflow builds and tests the extension once with pinned Node.js, VSCE, runner, and GitHub Action versions. It records the source commit, tool versions, artifact size, and SHA-256 digest in `release-manifest.json`, then passes the same prebuilt VSIX to the Visual Studio Marketplace publisher and the GitHub release publisher. The GitHub Release contains the versioned VSIX, its `.sha256` file, and the manifest.
+
+Pull requests and `publish: false` manual runs exercise the complete build, test, and packaging path without publishing or receiving publication credentials. Production publication is restricted to a manual run from `main` with an exact expected version and Marketplace OIDC trust. The Marketplace signs and repackages extensions, so its public download bytes can differ from the uploaded VSIX; the GitHub asset and recorded digest preserve the original build artifact for independent verification.
+For safety, `.safe-code.json` must be either missing or a regular file. Safe Code refuses symbolic links, directories, and other filesystem entry types, and it never follows a link to read or update project ignores. A missing configuration is created exclusively; an existing valid configuration is revalidated against the exact bytes and file identity that were read before it is replaced atomically. If the path or contents change during the operation, the update stops and the in-memory project ignores fail closed.
+
 ## Documentation
 
 - [Documentation index](./docs/README.md)
@@ -87,6 +94,9 @@ Safe Code reloads this file when it is created, changed, or deleted. Invalid con
   "safeCode.enabled": true,
   "safeCode.scanWorkspaceOnStartup": true,
   "safeCode.minimumSecretLength": 8,
+  "safeCode.maxFileSizeBytes": 1048576,
+  "safeCode.maxWorkspaceScanFiles": 10000,
+  "safeCode.maxWorkspaceScanBytes": 104857600,
   "safeCode.ignoredPaths": [
     "**/node_modules/**",
     "**/.git/**",
@@ -102,5 +112,9 @@ Safe Code reloads this file when it is created, changed, or deleted. Invalid con
 ```
 
 The built-in dependency, build, cache, and exact `.env/` directory exclusions are always enforced. Add workspace-relative glob patterns to `safeCode.ignoredPaths` for project-specific generated files or directories.
+
+`safeCode.maxFileSizeBytes` limits each file to 1 MiB by default. Closed files are checked before they are opened, while open or unsaved documents are measured from their current UTF-8 text. Files exactly at the limit are accepted; larger files are skipped and any old Safe Code diagnostic for them is removed.
+
+Full workspace scans consider at most `safeCode.maxWorkspaceScanFiles` supported files and `safeCode.maxWorkspaceScanBytes` of text (10,000 files and 100 MiB by default). When either workspace budget is reached, Safe Code reports a partial scan, keeps results for processed files, and leaves diagnostics for unvisited files unchanged. Oversized files, partial scans, and read failures are reported as aggregate counts instead of one notification per file.
 
 Set `safeCode.scanWorkspaceOnStartup` to `false` if you prefer to run full workspace scans manually. Supported files that are created or changed while VS Code is open are still scanned automatically, and their Problems entries remain visible after their editor tabs close.

@@ -28,24 +28,43 @@ export const defaultIgnoredPaths = [
   "**/.cache/**"
 ];
 
-const supportedExtensions = new Set([
-  ".ts",
-  ".tsx",
-  ".js",
-  ".jsx",
-  ".py",
-  ".go",
-  ".java",
-  ".cs",
-  ".php",
-  ".rb",
-  ".json",
-  ".yaml",
-  ".yml",
-  ".toml",
-  ".ini",
-  ".md"
-]);
+const supportedExtensionNames = [
+  "ts",
+  "tsx",
+  "js",
+  "jsx",
+  "py",
+  "go",
+  "java",
+  "cs",
+  "php",
+  "rb",
+  "json",
+  "yaml",
+  "yml",
+  "toml",
+  "ini",
+  "md"
+] as const;
+
+const supportedExtensions = new Set(supportedExtensionNames.map((extension) => `.${extension}`));
+
+export const supportedWorkspaceFileGlob = `**/{${[
+  ...supportedExtensionNames.map((extension) => `*.${toCaseInsensitiveGlob(extension)}`),
+  `.${toCaseInsensitiveGlob("env")}`,
+  `.${toCaseInsensitiveGlob("env")}.*`
+].join(",")}}`;
+
+/*
+ * VS Code glob matching follows the workspace filesystem's case rules. Character
+ * classes keep discovery aligned with shouldScanFile(), which is intentionally
+ * case-insensitive even on case-sensitive filesystems.
+ */
+function toCaseInsensitiveGlob(value: string): string {
+  return [...value]
+    .map((character) => `[${character.toLowerCase()}${character.toUpperCase()}]`)
+    .join("");
+}
 
 const fakeExactValues = new Set([
   "example",

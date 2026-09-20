@@ -19,8 +19,23 @@ import {
   getEnvironmentWorkspaceIdentity
 } from "./environmentStore";
 import { IgnoreStore } from "./ignoreStore";
-import { projectIgnoreConfigFileName, ProjectIgnoreStore } from "./projectIgnoreStore";
+import {
+  getProjectIgnoreFileErrorMessage,
+  projectIgnoreConfigFileName,
+  ProjectIgnoreStore
+} from "./projectIgnoreStore";
 import { defaultIgnoredPaths, scanDocument, ScannerOptions, shouldScanDocument, shouldScanUri } from "./scanner";
+import { supportedWorkspaceFileGlob } from "./scannerCore";
+import {
+  BoundedScanQueue,
+  DEFAULT_MAX_FILE_SIZE_BYTES,
+  DEFAULT_MAX_WORKSPACE_SCAN_BYTES,
+  DEFAULT_MAX_WORKSPACE_SCAN_FILES,
+  getDiscoveryMaxResults,
+  getStaleDiagnosticKeys,
+  isPositiveInteger,
+  WorkspaceScanBudget
+} from "./workspaceScanCore";
 
 const diagnosticSource = "Safe Code";
 const ignoreWarningCommand = "safeCode.ignoreWarning";
@@ -28,12 +43,31 @@ const ignoreWarningForProjectCommand = "safeCode.ignoreWarningForProject";
 const moveSecretToEnvCommand = "safeCode.moveSecretToEnv";
 const scanWorkspaceCommand = "safeCode.scanWorkspace";
 
-type WorkspaceScanResult = {
+type WorkspaceScanPartialReason = "file-limit" | "byte-limit" | "scan-state-changed";
+
+export type WorkspaceScanResult = {
   cancelled: boolean;
   failedFiles: number;
   findings: number;
+  oversizedFiles: number;
+  partial: boolean;
+  partialReason?: WorkspaceScanPartialReason;
+  scannedBytes: number;
   scannedFiles: number;
 };
+
+type ScanNowResult = {
+  byteLength: number;
+  findings: number;
+  status: "scanned" | "oversized" | "byte-budget-exhausted" | "skipped" | "stale";
+};
+
+type PendingScan = {
+  document?: vscode.TextDocument;
+  uri: vscode.Uri;
+};
+
+type FileScanOutcome = "scanned" | "oversized" | "failed" | "skipped" | "stale";
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const diagnostics = vscode.languages.createDiagnosticCollection("safe-code");
@@ -41,23 +75,55 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const ignoreStore = new IgnoreStore(context.workspaceState);
   const projectIgnoreStore = new ProjectIgnoreStore(output);
   const environmentMigrationCoordinator = new EnvironmentMigrationCoordinator();
-  const pendingScans = new Map<string, ReturnType<typeof setTimeout>>();
+  const pendingScans = new BoundedScanQueue<PendingScan>();
   const diagnosticUris = new Map<string, vscode.Uri>();
+  const workspaceScanOpeningUris = new Set<string>();
+  let pendingScanTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingScanDrainInProgress = false;
+  let overflowRescanInProgress = false;
+  let scanGeneration = 0;
   let workspaceScanInProgress = false;
   let workspaceRescanRequested = false;
 
   await projectIgnoreStore.reloadAll();
 
-  const scanNow = (document: vscode.TextDocument, options = getScannerOptions()): number => {
+  const deleteDiagnostic = (uri: vscode.Uri): void => {
+    diagnostics.delete(uri);
+    diagnosticUris.delete(uri.toString());
+  };
+
+  const scanNow = (
+    document: vscode.TextDocument,
+    options = getScannerOptions(),
+    maximumAllowedBytes = options.maxFileSizeBytes,
+    expectedGeneration = scanGeneration
+  ): ScanNowResult => {
     const key = document.uri.toString();
 
-    if (!isEnabled() || !shouldScanDocument(document, options)) {
-      diagnostics.delete(document.uri);
-      diagnosticUris.delete(key);
-      return 0;
+    if (expectedGeneration !== scanGeneration) {
+      return { status: "stale", byteLength: 0, findings: 0 };
     }
 
-    const documentDiagnostics = scanDocument(document, options)
+    if (!isEnabled() || !shouldScanDocument(document, options)) {
+      deleteDiagnostic(document.uri);
+      return { status: "skipped", byteLength: 0, findings: 0 };
+    }
+
+    const scanResult = scanDocument(document, options, maximumAllowedBytes);
+    if (scanResult.status === "oversized") {
+      deleteDiagnostic(document.uri);
+      return { status: "oversized", byteLength: scanResult.byteLength, findings: 0 };
+    }
+
+    if (scanResult.status === "byte-budget-exhausted") {
+      return { status: "byte-budget-exhausted", byteLength: scanResult.byteLength, findings: 0 };
+    }
+
+    if (expectedGeneration !== scanGeneration) {
+      return { status: "stale", byteLength: scanResult.byteLength, findings: 0 };
+    }
+
+    const documentDiagnostics = scanResult.findings
       .filter((finding) => {
         return (
           !ignoreStore.isIgnored(document.uri, finding.lineText, finding.ruleId) &&
@@ -78,103 +144,264 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       diagnosticUris.delete(key);
     }
 
-    return documentDiagnostics.length;
+    return {
+      status: "scanned",
+      byteLength: scanResult.byteLength,
+      findings: documentDiagnostics.length
+    };
   };
 
-  const queueScan = (document: vscode.TextDocument): void => {
-    const key = document.uri.toString();
-    const pendingScan = pendingScans.get(key);
-
-    if (pendingScan) {
-      clearTimeout(pendingScan);
-      pendingScans.delete(key);
-    }
-
-    if (!isEnabled() || !shouldScanDocument(document, getScannerOptions())) {
-      diagnostics.delete(document.uri);
-      diagnosticUris.delete(key);
-      return;
-    }
-
-    pendingScans.set(
-      key,
-      setTimeout(() => {
-        pendingScans.delete(key);
-        scanNow(document);
-      }, 250)
-    );
-  };
-
-  const queueUriScan = (uri: vscode.Uri): void => {
-    const key = uri.toString();
-    const pendingScan = pendingScans.get(key);
-
-    if (pendingScan) {
-      clearTimeout(pendingScan);
-      pendingScans.delete(key);
-    }
-
-    if (!isEnabled() || !shouldScanUri(uri, getScannerOptions())) {
-      diagnostics.delete(uri);
-      diagnosticUris.delete(key);
-      return;
-    }
-
-    pendingScans.set(
-      key,
-      setTimeout(() => {
-        pendingScans.delete(key);
-        void scanUri(uri);
-      }, 250)
-    );
-  };
-
-  const scanUri = async (uri: vscode.Uri): Promise<void> => {
-    const options = getScannerOptions();
-    if (!isEnabled() || !shouldScanUri(uri, options)) {
-      removeDiagnostics(uri);
-      return;
-    }
-
-    try {
-      const stat = await vscode.workspace.fs.stat(uri);
-      if ((stat.type & vscode.FileType.File) === 0) {
-        removeDiagnostics(uri);
-        return;
-      }
-      const document = await vscode.workspace.openTextDocument(uri);
-      scanNow(document, options);
-    } catch (error) {
-      removeDiagnostics(uri);
-      console.warn(`Safe Code could not scan ${uri.fsPath}: ${String(error)}`);
-    }
-  };
+  const isUriScanCurrent = (uri: vscode.Uri, version: number): boolean =>
+    pendingScans.isCurrent(uri.toString(), version);
 
   const removeDiagnostics = (uri: vscode.Uri, includeDescendants = false): void => {
-    for (const [key, pendingScan] of pendingScans) {
-      const pendingUri = vscode.Uri.parse(key);
-      if (isSameOrDescendantUri(uri, pendingUri, includeDescendants)) {
-        clearTimeout(pendingScan);
-        pendingScans.delete(key);
-      }
+    if (includeDescendants) {
+      pendingScans.clear();
+    } else {
+      pendingScans.remove(uri.toString());
     }
+    deleteDiagnostic(uri);
 
-    diagnostics.delete(uri);
-    diagnosticUris.delete(uri.toString());
     if (includeDescendants) {
       for (const [key, diagnosticUri] of diagnosticUris) {
         if (isSameOrDescendantUri(uri, diagnosticUri, true)) {
-          diagnostics.delete(diagnosticUri);
+          deleteDiagnostic(diagnosticUri);
           diagnosticUris.delete(key);
         }
       }
     }
   };
 
-  const scanOpenDocuments = (): void => {
-    for (const document of vscode.workspace.textDocuments) {
-      scanNow(document);
+  const getOpenDocument = (uri: vscode.Uri): vscode.TextDocument | undefined => {
+    const key = uri.toString();
+    return vscode.workspace.textDocuments.find((document) => document.uri.toString() === key);
+  };
+
+  const scanUri = async (
+    uri: vscode.Uri,
+    expectedUriVersion: number,
+    options = getScannerOptions(),
+    expectedGeneration = scanGeneration
+  ): Promise<FileScanOutcome> => {
+    if (expectedGeneration !== scanGeneration || !isUriScanCurrent(uri, expectedUriVersion)) {
+      return "stale";
     }
+
+    if (!isEnabled() || !shouldScanUri(uri, options)) {
+      deleteDiagnostic(uri);
+      return "skipped";
+    }
+
+    try {
+      const openDocument = getOpenDocument(uri);
+      if (openDocument) {
+        return toFileScanOutcome(scanNow(openDocument, options, options.maxFileSizeBytes, expectedGeneration));
+      }
+
+      const stat = await vscode.workspace.fs.stat(uri);
+      if (expectedGeneration !== scanGeneration || !isUriScanCurrent(uri, expectedUriVersion)) {
+        return "stale";
+      }
+
+      if ((stat.type & vscode.FileType.File) === 0) {
+        deleteDiagnostic(uri);
+        return "skipped";
+      }
+
+      if (stat.size > options.maxFileSizeBytes) {
+        deleteDiagnostic(uri);
+        return "oversized";
+      }
+
+      const documentOpenedDuringStat = getOpenDocument(uri);
+      if (documentOpenedDuringStat) {
+        return toFileScanOutcome(
+          scanNow(documentOpenedDuringStat, options, options.maxFileSizeBytes, expectedGeneration)
+        );
+      }
+
+      const key = uri.toString();
+      workspaceScanOpeningUris.add(key);
+      let document: vscode.TextDocument;
+      try {
+        document = await vscode.workspace.openTextDocument(uri);
+      } finally {
+        workspaceScanOpeningUris.delete(key);
+      }
+
+      if (expectedGeneration !== scanGeneration || !isUriScanCurrent(uri, expectedUriVersion)) {
+        return "stale";
+      }
+
+      return toFileScanOutcome(scanNow(document, options, options.maxFileSizeBytes, expectedGeneration));
+    } catch {
+      if (expectedGeneration !== scanGeneration || !isUriScanCurrent(uri, expectedUriVersion)) {
+        return "stale";
+      }
+
+      deleteDiagnostic(uri);
+      return "failed";
+    }
+  };
+
+  const scanPendingJob = async (job: PendingScan, version: number): Promise<FileScanOutcome> => {
+    const options = getScannerOptions();
+    const expectedGeneration = scanGeneration;
+    if (!isUriScanCurrent(job.uri, version)) {
+      return "stale";
+    }
+
+    if (job.document) {
+      return toFileScanOutcome(scanNow(job.document, options, options.maxFileSizeBytes, expectedGeneration));
+    }
+
+    return scanUri(job.uri, version, options, expectedGeneration);
+  };
+
+  const drainPendingScans = async (): Promise<void> => {
+    if (pendingScanDrainInProgress) {
+      return;
+    }
+
+    pendingScanDrainInProgress = true;
+    let failedFiles = 0;
+    let oversizedFiles = 0;
+
+    try {
+      let queuedScan = pendingScans.shift();
+      while (queuedScan) {
+        try {
+          const outcome = await scanPendingJob(queuedScan.value, queuedScan.version);
+          if (outcome === "failed") {
+            failedFiles += 1;
+          } else if (outcome === "oversized") {
+            oversizedFiles += 1;
+          }
+        } catch {
+          failedFiles += 1;
+        } finally {
+          pendingScans.release(queuedScan.key, queuedScan.version);
+        }
+
+        queuedScan = pendingScans.shift();
+      }
+    } finally {
+      const overflowed = pendingScans.consumeOverflow();
+      pendingScanDrainInProgress = false;
+
+      if (oversizedFiles > 0 || failedFiles > 0 || overflowed) {
+        const overflowSuffix = overflowed ? " A silent workspace rescan was requested after queue overflow." : "";
+        output.appendLine(
+          `Safe Code file-event batch skipped ${oversizedFiles} oversized files and could not read ${failedFiles} files.${overflowSuffix}`
+        );
+      }
+
+      if (pendingScans.size > 0) {
+        schedulePendingScanDrain();
+      }
+
+      if (overflowed) {
+        void requestOverflowRescan();
+      }
+    }
+  };
+
+  const schedulePendingScanDrain = (): void => {
+    if (pendingScanDrainInProgress) {
+      return;
+    }
+
+    if (pendingScanTimer) {
+      return;
+    }
+
+    pendingScanTimer = setTimeout(() => {
+      pendingScanTimer = undefined;
+      void drainPendingScans();
+    }, 250);
+  };
+
+  const queuePendingScan = (job: PendingScan): void => {
+    pendingScans.enqueue(job.uri.toString(), job);
+    schedulePendingScanDrain();
+  };
+
+  const queueScan = (document: vscode.TextDocument): void => {
+    const key = document.uri.toString();
+    if (workspaceScanOpeningUris.has(key)) {
+      return;
+    }
+
+    const options = getScannerOptions();
+    if (!isEnabled() || !shouldScanDocument(document, options)) {
+      removeDiagnostics(document.uri);
+      return;
+    }
+
+    queuePendingScan({ document, uri: document.uri });
+  };
+
+  const queueUriScan = (uri: vscode.Uri): void => {
+    const options = getScannerOptions();
+    if (!isEnabled() || !shouldScanUri(uri, options)) {
+      removeDiagnostics(uri);
+      return;
+    }
+
+    queuePendingScan({ uri });
+  };
+
+  const requestOverflowRescan = async (): Promise<void> => {
+    if (overflowRescanInProgress) {
+      workspaceRescanRequested = true;
+      return;
+    }
+
+    overflowRescanInProgress = true;
+    try {
+      await scanWorkspace(false);
+    } finally {
+      overflowRescanInProgress = false;
+      if (workspaceRescanRequested && !workspaceScanInProgress) {
+        workspaceRescanRequested = false;
+        void requestOverflowRescan();
+      }
+    }
+  };
+
+  const clearPendingScans = (): void => {
+    pendingScans.clear();
+    if (pendingScanTimer) {
+      clearTimeout(pendingScanTimer);
+      pendingScanTimer = undefined;
+    }
+  };
+
+  const invalidateScanState = (): void => {
+    scanGeneration += 1;
+    clearPendingScans();
+  };
+
+  const scanOpenDocuments = (): { oversizedFiles: number; scannedFiles: number } => {
+    const options = getScannerOptions();
+    const expectedGeneration = scanGeneration;
+    let oversizedFiles = 0;
+    let scannedFiles = 0;
+
+    for (const document of vscode.workspace.textDocuments) {
+      const result = scanNow(document, options, options.maxFileSizeBytes, expectedGeneration);
+      if (result.status === "oversized") {
+        oversizedFiles += 1;
+      } else if (result.status === "scanned") {
+        scannedFiles += 1;
+      }
+    }
+
+    if (oversizedFiles > 0) {
+      output.appendLine(`Safe Code skipped ${oversizedFiles} oversized open files.`);
+    }
+
+    return { oversizedFiles, scannedFiles };
   };
 
   const clearTrackedDiagnostics = (): void => {
@@ -182,7 +409,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     diagnosticUris.clear();
   };
 
-  const scanWorkspace = async (interactive: boolean): Promise<void> => {
+  async function scanWorkspace(interactive: boolean): Promise<WorkspaceScanResult | undefined> {
     if (!vscode.workspace.workspaceFolders?.length) {
       if (interactive) {
         void vscode.window.showWarningMessage("Safe Code needs an open folder or workspace to scan.");
@@ -218,65 +445,215 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         },
         async (progress, token): Promise<WorkspaceScanResult> => {
           const options = getScannerOptions();
+          const expectedGeneration = scanGeneration;
+          const budget = new WorkspaceScanBudget(options);
+          const result = createEmptyWorkspaceScanResult();
           const previousDiagnosticUris = new Map(diagnosticUris);
           const currentDiagnosticKeys = new Set<string>();
           let discoveredUris: vscode.Uri[];
           try {
             discoveredUris = await vscode.workspace.findFiles(
-              "**/*",
+              supportedWorkspaceFileGlob,
               createExcludeGlob(options.ignoredPaths),
-              undefined,
+              getDiscoveryMaxResults(options.maxWorkspaceScanFiles),
               token
             );
           } catch (error) {
             if (token.isCancellationRequested) {
-              return { cancelled: true, failedFiles: 0, findings: 0, scannedFiles: 0 };
+              result.cancelled = true;
+              return result;
             }
             throw error;
           }
-          const candidateUris = discoveredUris.filter((uri) => shouldScanUri(uri, options));
-          let failedFiles = 0;
-          let findings = 0;
-          let scannedFiles = 0;
+
+          if (expectedGeneration !== scanGeneration) {
+            result.partial = true;
+            result.partialReason = "scan-state-changed";
+            return result;
+          }
+
+          const discoveryWasTruncated = discoveredUris.length > options.maxWorkspaceScanFiles;
+          if (discoveryWasTruncated) {
+            result.partial = true;
+            result.partialReason = "file-limit";
+          }
+
+          const candidateUris = discoveredUris
+            .filter((uri) => shouldScanUri(uri, options))
+            .sort((left, right) => left.toString().localeCompare(right.toString()))
+            .slice(0, options.maxWorkspaceScanFiles);
+          let processedFiles = 0;
 
           for (const uri of candidateUris) {
             if (token.isCancellationRequested) {
               break;
             }
 
+            if (expectedGeneration !== scanGeneration) {
+              result.partial = true;
+              result.partialReason = "scan-state-changed";
+              break;
+            }
+
+            const key = uri.toString();
+            const expectedUriVersion = pendingScans.begin(key);
             try {
-              const document = await vscode.workspace.openTextDocument(uri);
-              const fileFindings = scanNow(document, options);
-              const key = uri.toString();
-              findings += fileFindings;
-              if (fileFindings > 0) {
+              let document = getOpenDocument(uri);
+              if (!document) {
+                const stat = await vscode.workspace.fs.stat(uri);
+                if (token.isCancellationRequested) {
+                  break;
+                }
+
+                if (expectedGeneration !== scanGeneration) {
+                  result.partial = true;
+                  result.partialReason = "scan-state-changed";
+                  break;
+                }
+
+                if (!isUriScanCurrent(uri, expectedUriVersion)) {
+                  currentDiagnosticKeys.add(key);
+                  processedFiles += 1;
+                  reportWorkspaceProgress(progress, processedFiles, candidateUris.length);
+                  continue;
+                }
+
+                if ((stat.type & vscode.FileType.File) === 0) {
+                  deleteDiagnostic(uri);
+                  processedFiles += 1;
+                  reportWorkspaceProgress(progress, processedFiles, candidateUris.length);
+                  continue;
+                }
+
+                const preflightDecision = budget.check(stat.size);
+                if (preflightDecision === "oversized") {
+                  deleteDiagnostic(uri);
+                  result.oversizedFiles += 1;
+                  processedFiles += 1;
+                  reportWorkspaceProgress(progress, processedFiles, candidateUris.length);
+                  continue;
+                }
+
+                if (preflightDecision === "file-budget-exhausted") {
+                  result.partial = true;
+                  result.partialReason = "file-limit";
+                  break;
+                }
+
+                if (preflightDecision === "byte-budget-exhausted") {
+                  result.partial = true;
+                  result.partialReason = "byte-limit";
+                  break;
+                }
+
+                document = getOpenDocument(uri);
+                if (!document) {
+                  workspaceScanOpeningUris.add(key);
+                  try {
+                    document = await vscode.workspace.openTextDocument(uri);
+                  } finally {
+                    workspaceScanOpeningUris.delete(key);
+                  }
+                }
+              } else {
+                const fileCountDecision = budget.check(0);
+                if (fileCountDecision === "file-budget-exhausted") {
+                  result.partial = true;
+                  result.partialReason = "file-limit";
+                  break;
+                }
+              }
+
+              if (token.isCancellationRequested) {
+                break;
+              }
+
+              if (!isUriScanCurrent(uri, expectedUriVersion)) {
+                currentDiagnosticKeys.add(key);
+                processedFiles += 1;
+                reportWorkspaceProgress(progress, processedFiles, candidateUris.length);
+                continue;
+              }
+
+              const fileResult = scanNow(document, options, budget.remainingBytes, expectedGeneration);
+              if (fileResult.status === "stale") {
+                result.partial = true;
+                result.partialReason = "scan-state-changed";
+                break;
+              }
+
+              if (fileResult.status === "byte-budget-exhausted") {
+                result.partial = true;
+                result.partialReason = "byte-limit";
+                break;
+              }
+
+              if (fileResult.status === "oversized") {
+                result.oversizedFiles += 1;
+                processedFiles += 1;
+                reportWorkspaceProgress(progress, processedFiles, candidateUris.length);
+                continue;
+              }
+
+              if (fileResult.status !== "scanned") {
+                processedFiles += 1;
+                reportWorkspaceProgress(progress, processedFiles, candidateUris.length);
+                continue;
+              }
+
+              const budgetDecision = budget.accept(fileResult.byteLength);
+              if (budgetDecision !== "accepted") {
+                result.partial = true;
+                result.partialReason = budgetDecision === "file-budget-exhausted" ? "file-limit" : "byte-limit";
+                break;
+              }
+
+              result.findings += fileResult.findings;
+              if (fileResult.findings > 0) {
                 currentDiagnosticKeys.add(key);
               }
-            } catch (error) {
-              failedFiles += 1;
-              console.warn(`Safe Code could not scan ${uri.fsPath}: ${String(error)}`);
-            }
-
-            scannedFiles += 1;
-            progress.report({
-              message: `${scannedFiles} of ${candidateUris.length} files`,
-              increment: candidateUris.length > 0 ? 100 / candidateUris.length : undefined
-            });
-          }
-
-          const cancelled = token.isCancellationRequested;
-          if (!cancelled) {
-            for (const [key, uri] of previousDiagnosticUris) {
-              if (!currentDiagnosticKeys.has(key)) {
-                diagnostics.delete(uri);
-                diagnosticUris.delete(key);
+              result.scannedFiles = budget.acceptedFiles;
+              result.scannedBytes = budget.acceptedBytes;
+            } catch {
+              if (!isUriScanCurrent(uri, expectedUriVersion)) {
+                currentDiagnosticKeys.add(key);
+                processedFiles += 1;
+                reportWorkspaceProgress(progress, processedFiles, candidateUris.length);
+                continue;
               }
+
+              result.failedFiles += 1;
+            } finally {
+              pendingScans.release(key, expectedUriVersion);
+            }
+
+            processedFiles += 1;
+            reportWorkspaceProgress(progress, processedFiles, candidateUris.length);
+          }
+
+          result.cancelled = token.isCancellationRequested;
+          if (expectedGeneration !== scanGeneration) {
+            result.partial = true;
+            result.partialReason = "scan-state-changed";
+          }
+
+          for (const key of getStaleDiagnosticKeys(
+            previousDiagnosticUris.keys(),
+            currentDiagnosticKeys,
+            result.cancelled,
+            result.partial
+          )) {
+            const uri = previousDiagnosticUris.get(key);
+            if (uri) {
+              deleteDiagnostic(uri);
             }
           }
 
-          return { cancelled, failedFiles, findings, scannedFiles };
+          return result;
         }
       );
+
+      output.appendLine(formatWorkspaceScanOutput(result));
 
       if (result.cancelled) {
         if (interactive) {
@@ -284,17 +661,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             `Safe Code workspace scan cancelled after ${result.scannedFiles} files. Processed results were kept.`
           );
         }
-        return;
+        return result;
       }
 
-      if (interactive) {
-        const failureSuffix = result.failedFiles > 0 ? ` ${result.failedFiles} files could not be read.` : "";
+      if (interactive && result.partial) {
+        void vscode.window.showWarningMessage(formatPartialWorkspaceScanMessage(result));
+      } else if (interactive) {
         void vscode.window.showInformationMessage(
-          `Safe Code scanned ${result.scannedFiles} files and found ${result.findings} warnings.${failureSuffix}`
+          `Safe Code scanned ${result.scannedFiles} files and found ${result.findings} warnings.${formatWorkspaceSkipSuffix(result)}`
         );
       }
+
+      return result;
     } catch (error) {
-      void vscode.window.showErrorMessage(`Safe Code workspace scan failed: ${String(error)}`);
+      const message = `Safe Code workspace scan failed: ${String(error)}`;
+      output.appendLine(message);
+      if (interactive) {
+        void vscode.window.showErrorMessage(message);
+      }
+      return undefined;
     } finally {
       workspaceScanInProgress = false;
       if (workspaceRescanRequested) {
@@ -302,9 +687,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         void scanWorkspace(false);
       }
     }
-  };
+  }
 
   const refreshProjectConfiguration = async (uri: vscode.Uri): Promise<void> => {
+    invalidateScanState();
     await projectIgnoreStore.reloadForUri(uri);
     if (isEnabled()) {
       void scanWorkspace(false);
@@ -335,6 +721,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     diagnostics,
     output,
     fileWatcher,
+    new vscode.Disposable(clearPendingScans),
     fileWatcher.onDidCreate(handleFileCreateOrChange),
     fileWatcher.onDidChange(handleFileCreateOrChange),
     fileWatcher.onDidDelete(handleFileDelete),
@@ -350,6 +737,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
 
+      invalidateScanState();
       if (!isEnabled()) {
         clearTrackedDiagnostics();
         return;
@@ -363,6 +751,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(async () => {
+      invalidateScanState();
       await projectIgnoreStore.reloadAll();
       clearTrackedDiagnostics();
       if (isEnabled()) {
@@ -427,15 +816,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           await projectIgnoreStore.add(uri, document.lineAt(line).text, ruleId);
           scanNow(document);
         } catch (error) {
-          const message = `Safe Code could not update ${projectIgnoreConfigFileName}: ${String(error)}`;
+          const message = `Safe Code could not update ${projectIgnoreConfigFileName}. ${getProjectIgnoreFileErrorMessage(
+            error,
+            "write-failed"
+          )}`;
           output.appendLine(message);
           void vscode.window.showErrorMessage(message);
         }
       }
     ),
     vscode.commands.registerCommand("safeCode.scanOpenFiles", () => {
-      scanOpenDocuments();
-      vscode.window.showInformationMessage("Safe Code scanned open workspace files.");
+      const result = scanOpenDocuments();
+      const oversizedSuffix =
+        result.oversizedFiles > 0 ? ` ${result.oversizedFiles} oversized files were skipped.` : "";
+      void vscode.window.showInformationMessage(
+        `Safe Code scanned ${result.scannedFiles} open workspace files.${oversizedSuffix}`
+      );
     }),
     vscode.commands.registerCommand(scanWorkspaceCommand, () => scanWorkspace(true))
   );
@@ -449,6 +845,72 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 export function deactivate(): void {
   // VS Code disposes subscriptions registered during activation.
+}
+
+function createEmptyWorkspaceScanResult(): WorkspaceScanResult {
+  return {
+    cancelled: false,
+    failedFiles: 0,
+    findings: 0,
+    oversizedFiles: 0,
+    partial: false,
+    scannedBytes: 0,
+    scannedFiles: 0
+  };
+}
+
+function toFileScanOutcome(result: ScanNowResult): FileScanOutcome {
+  switch (result.status) {
+    case "scanned":
+      return "scanned";
+    case "oversized":
+      return "oversized";
+    case "stale":
+      return "stale";
+    case "byte-budget-exhausted":
+    case "skipped":
+      return "skipped";
+  }
+}
+
+function reportWorkspaceProgress(
+  progress: vscode.Progress<{ increment?: number; message?: string }>,
+  processedFiles: number,
+  totalFiles: number
+): void {
+  progress.report({
+    message: `${processedFiles} of ${totalFiles} files`,
+    increment: totalFiles > 0 ? 100 / totalFiles : undefined
+  });
+}
+
+function formatWorkspaceScanOutput(result: WorkspaceScanResult): string {
+  const status = result.cancelled ? "cancelled" : result.partial ? "partial" : "complete";
+  const reason = result.partialReason ? ` (${result.partialReason})` : "";
+  return `Safe Code workspace scan ${status}${reason}: scanned ${result.scannedFiles} files / ${result.scannedBytes} UTF-8 bytes, found ${result.findings} warnings, skipped ${result.oversizedFiles} oversized files, and could not read ${result.failedFiles} files.`;
+}
+
+function formatPartialWorkspaceScanMessage(result: WorkspaceScanResult): string {
+  const reason =
+    result.partialReason === "file-limit"
+      ? "the workspace file limit"
+      : result.partialReason === "byte-limit"
+        ? "the workspace byte limit"
+        : "scan settings or workspace state changed";
+
+  return `Safe Code scanned ${result.scannedFiles} files and stopped at ${reason}. Processed results were kept and unvisited diagnostics were left unchanged.${formatWorkspaceSkipSuffix(result)}`;
+}
+
+function formatWorkspaceSkipSuffix(result: WorkspaceScanResult): string {
+  const details: string[] = [];
+  if (result.oversizedFiles > 0) {
+    details.push(`${result.oversizedFiles} oversized files were skipped.`);
+  }
+  if (result.failedFiles > 0) {
+    details.push(`${result.failedFiles} files could not be read.`);
+  }
+
+  return details.length > 0 ? ` ${details.join(" ")}` : "";
 }
 
 class SafeCodeActionProvider implements vscode.CodeActionProvider {
@@ -817,8 +1279,28 @@ function getScannerOptions(): ScannerOptions {
   const configuredIgnoredPaths = configuration.get<string[]>("ignoredPaths", []);
   return {
     minimumSecretLength: configuration.get("minimumSecretLength", 8),
+    maxFileSizeBytes: getPositiveIntegerSetting(configuration, "maxFileSizeBytes", DEFAULT_MAX_FILE_SIZE_BYTES),
+    maxWorkspaceScanFiles: getPositiveIntegerSetting(
+      configuration,
+      "maxWorkspaceScanFiles",
+      DEFAULT_MAX_WORKSPACE_SCAN_FILES
+    ),
+    maxWorkspaceScanBytes: getPositiveIntegerSetting(
+      configuration,
+      "maxWorkspaceScanBytes",
+      DEFAULT_MAX_WORKSPACE_SCAN_BYTES
+    ),
     ignoredPaths: [...new Set([...defaultIgnoredPaths, ...configuredIgnoredPaths])]
   };
+}
+
+function getPositiveIntegerSetting(
+  configuration: vscode.WorkspaceConfiguration,
+  key: string,
+  defaultValue: number
+): number {
+  const value = configuration.get<unknown>(key);
+  return isPositiveInteger(value) ? value : defaultValue;
 }
 
 function createExcludeGlob(ignoredPaths: string[]): string | undefined {
