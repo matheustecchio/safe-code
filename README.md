@@ -15,7 +15,7 @@ Safe Code is a lightweight VS Code extension that detects possible hardcoded sec
 
 ## Supported files
 
-Safe Code scans common code and config files: `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.go`, `.java`, `.cs`, `.php`, `.rb`, `.env`, `.json`, `.yaml`, `.yml`, `.toml`, `.ini`, and `.md`.
+Safe Code scans common code and config files: `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.go`, `.java`, `.cs`, `.php`, `.rb`, `.env`, `.json`, `.yaml`, `.yml`, `.toml`, `.ini`, and `.md`. Files named `.env`, `.env.local`, and other `.env.*` variants remain eligible, but directories named exactly `.env` are always excluded at any depth.
 
 ## Current detections
 
@@ -47,9 +47,9 @@ becomes:
 const clientSecret = process.env.CLIENT_SECRET;
 ```
 
-Safe Code infers an uppercase snake-case name, writes the real value to `.env` at the workspace-folder root, and creates or updates `.env.example` with an empty `CLIENT_SECRET=` entry. Before writing the value, it adds an exact `.env` entry to the root `.gitignore`.
+Safe Code infers an uppercase snake-case name, writes the real value to `.env` at the workspace-folder root, and creates or updates `.env.example` with an empty `CLIENT_SECRET=` entry. Before writing the value, it places a protected temporary-file rule followed by an exact `/.env` rule at the end of the root `.gitignore`, then verifies both rules with Git.
 
-The fix refuses to modify a tracked `.env`, symbolic links, an existing environment variable with a different value, or ambiguous code such as object properties, destructuring, function calls, concatenations, and template literals. The secret value is never copied into `.env.example`. Existing ignore-warning quick fixes remain available.
+The cancellable fix is serialized per workspace and refuses tracked `.env` files, symbolic links, non-regular or invalid UTF-8 targets, concurrent changes, conflicting values, stale source ranges, and ambiguous code such as object properties, destructuring, function calls, concatenations, and template literals. It snapshots the three target files before changing anything and conditionally rolls back completed file and source edits if a later step fails. The secret value is never copied into `.env.example` or included in an error message. Existing ignore-warning quick fixes remain available.
 
 ## Ignoring warnings
 
@@ -100,6 +100,7 @@ For safety, `.safe-code.json` must be either missing or a regular file. Safe Cod
   "safeCode.ignoredPaths": [
     "**/node_modules/**",
     "**/.git/**",
+    "**/.env/**",
     "**/dist/**",
     "**/build/**",
     "**/coverage/**",
@@ -110,7 +111,7 @@ For safety, `.safe-code.json` must be either missing or a regular file. Safe Cod
 }
 ```
 
-The built-in dependency, build, and cache exclusions are always enforced. Add workspace-relative glob patterns to `safeCode.ignoredPaths` for project-specific generated files or directories.
+The built-in dependency, build, cache, and exact `.env/` directory exclusions are always enforced. Add workspace-relative glob patterns to `safeCode.ignoredPaths` for project-specific generated files or directories.
 
 `safeCode.maxFileSizeBytes` limits each file to 1 MiB by default. Closed files are checked before they are opened, while open or unsaved documents are measured from their current UTF-8 text. Files exactly at the limit are accepted; larger files are skipped and any old Safe Code diagnostic for them is removed.
 

@@ -135,7 +135,8 @@ safe-code/
 | `package.json` | VS Code extension manifest, commands, activation events, settings, scripts, and dependencies. |
 | `src/extension.ts` | Extension entry point. Wires events, diagnostics, commands, settings, and quick fixes. |
 | `src/environmentFixCore.ts` | Parses unambiguous assignments, infers environment names, and safely updates environment-file text without importing VS Code. |
-| `src/environmentStore.ts` | Refuses unsafe environment-file targets, checks Git tracking, and writes `.gitignore`, `.env`, and `.env.example` in safety order. |
+| `src/environmentMigrationCore.ts` | Serializes migrations per workspace, checks cancellation, journals mutations, and coordinates reverse-order rollback without importing VS Code. |
+| `src/environmentStore.ts` | Takes exact no-follow snapshots, verifies Git protection, and conditionally updates or restores `.gitignore`, `.env.example`, and `.env`. |
 | `src/ignoreCore.ts` | Contains VS Code-independent ignore identity, validation, parsing, and serialization logic. |
 | `src/projectIgnoreFile.ts` | Performs no-follow reads, stable snapshot validation, and atomic Node filesystem updates for `.safe-code.json`. |
 | `src/scanner.ts` | Decides which documents can be scanned and turns regex matches into `SecretFinding` objects. |
@@ -275,12 +276,16 @@ The environment action is limited to `generic-secret-assignment` diagnostics in 
 
 At execution time the command reopens and revalidates the source so a stale diagnostic cannot transform changed code. It converts names such as `clientSecret` to `CLIENT_SECRET`, then prepares these workspace-root updates:
 
-- `.gitignore` receives an exact `.env` entry before any secret is written.
+- `.gitignore` receives `/.safe-code-tmp-*` followed by a final exact `/.env` rule before any secret is written.
 - `.env` receives `CLIENT_SECRET="..."`; an existing different value causes the operation to stop.
 - `.env.example` receives only the empty `CLIENT_SECRET=` entry.
 - The source literal, including its quotes, becomes `process.env.CLIENT_SECRET`.
 
-The command refuses symbolic links and uses `git ls-files` to refuse a `.env` already tracked in the containing repository. A missing Git executable or a workspace outside a Git repository is allowed because the command creates the protective `.gitignore` entry. Other Git inspection errors fail closed. Environment files are written before the source edit so a failed edit cannot discard the only copy of the value.
+The command is cancellable and `EnvironmentMigrationCoordinator` serializes operations that target the same canonical workspace. Once inside that lock, the source version, diagnostic range, assignment, workspace-root identity, protected editor buffers, and exact target snapshots are revalidated before every mutation. The file store accepts only absent or regular UTF-8 targets, reads existing files without following symbolic links, refuses concurrent identity or byte changes, and prepares complete same-directory replacements before using an atomic rename for existing targets or exclusive hard-link creation for absent targets. New and updated `.env` files use mode `0600` on platforms that expose POSIX permissions.
+
+Git inspection fails closed when Git is unavailable or returns an ambiguous result. A confirmed non-repository workspace is allowed. Inside a repository, the command verifies that `.env` is untracked, writes the final root ignore rules, then uses `git check-ignore --no-index` to prove that the effective rules protect both `.env` and the exclusive mode-`0600` sibling temporary used for atomic replacement. It repeats these checks immediately before the secret write and again before commit.
+
+Mutations run in the order `.gitignore`, `.env.example`, `.env`, then source. Each completed mutation records the exact state that it owns. Cancellation, a rejected source edit, or any later failure restores owned changes in reverse order after revalidating each state; detected concurrent edits stop recovery rather than being overwritten. If safe rollback of the source or `.env` becomes impossible, the transaction deliberately retains the ignored environment file and reports a redacted manual-recovery message instead of risking secret exposure or data loss. Error messages are selected from typed, fixed text and never include source lines, file contents, paths, Git output, or secret values.
 
 ## Ignore Storage
 
@@ -339,6 +344,8 @@ Current settings are:
 - `safeCode.maxWorkspaceScanBytes` controls the aggregate UTF-8 byte budget for a full scan. It defaults to 104,857,600 (100 MiB).
 - `safeCode.ignoredPaths` controls workspace-relative glob patterns that Safe Code skips.
 
+The mandatory `**/.env/**` exclusion applies after user configuration is merged. It excludes directories named exactly `.env` at the workspace root or below it across discovery, watcher events, open-document scans, and stale-diagnostic cleanup. It does not exclude files named `.env`, `.env.local`, other `.env.*` files, or names such as `.env-config.ts`.
+
 The three resource settings accept positive integers. Invalid runtime values fall back to their defaults. Exact limits are inclusive.
 
 ## Manual Test Cases
@@ -375,7 +382,7 @@ To add a detection rule, edit `src/rules.ts` and follow [Detection Rules](./rule
 
 To change which files are scanned, edit `supportedExtensions` or `.env` handling in `src/scannerCore.ts`.
 
-To change default skipped paths, update `defaultIgnoredPaths` in `src/scanner.ts` and the `safeCode.ignoredPaths` default in `package.json`.
+To change default skipped paths, update `defaultIgnoredPaths` in `src/scannerCore.ts`, the `safeCode.ignoredPaths` default in `package.json`, and the duplicated integration-test defaults.
 
 To change diagnostics behavior, edit `scanNow(document)` in `src/extension.ts`.
 

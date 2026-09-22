@@ -16,6 +16,7 @@ const runtimeDirectoryName = "runtime";
 const defaultIgnoredPaths = [
   "**/node_modules/**",
   "**/.git/**",
+  "**/.env/**",
   "**/dist/**",
   "**/build/**",
   "**/coverage/**",
@@ -326,6 +327,165 @@ suite("Safe Code extension", () => {
     await eventually(() => getSafeCodeDiagnostics(supportedUri), (items) => items.length === 1);
   });
 
+  test("never diagnoses files inside root or nested .env directories", async () => {
+    const rootEnvironmentUri = await createWorkspaceRootFile(
+      ".env/root-secret.ts",
+      'const apiKey = "root-environment-directory-secret";'
+    );
+    const nestedEnvironmentUri = await createWorkspaceFile(
+      "nested/.env/nested-secret.ts",
+      'const token = "nested-environment-directory-secret";'
+    );
+    const watcherControlUri = await createWorkspaceFile("env-watcher-control.ts", "export const clean = true;");
+    const staleSourceUri = await createWorkspaceFile(
+      "move-into-env.ts",
+      'const apiKey = "stale-before-environment-directory-move";'
+    );
+
+    await vscode.workspace.fs.writeFile(
+      rootEnvironmentUri,
+      Buffer.from('const apiKey = "updated-root-environment-secret";')
+    );
+    await vscode.workspace.fs.writeFile(
+      nestedEnvironmentUri,
+      Buffer.from('const token = "updated-nested-environment-secret";')
+    );
+    await vscode.workspace.fs.writeFile(
+      watcherControlUri,
+      Buffer.from('const password = "watcher-control-secret";')
+    );
+    await eventually(() => getSafeCodeDiagnostics(watcherControlUri), (items) => items.length === 1);
+    await eventually(() => getSafeCodeDiagnostics(staleSourceUri), (items) => items.length === 1);
+
+    const staleIgnoredUri = vscode.Uri.joinPath(
+      runtimeDirectory,
+      "nested",
+      ".env",
+      path.basename(staleSourceUri.fsPath)
+    );
+    await vscode.workspace.fs.rename(staleSourceUri, staleIgnoredUri, { overwrite: false });
+    createdWorkspaceFiles = createdWorkspaceFiles.filter(
+      (candidate) => candidate.toString() !== staleSourceUri.toString()
+    );
+    createdWorkspaceFiles.push(staleIgnoredUri);
+    await eventually(() => getSafeCodeDiagnostics(staleSourceUri), (items) => items.length === 0);
+    assert.deepStrictEqual(getSafeCodeDiagnostics(staleIgnoredUri), []);
+
+    assert.deepStrictEqual(getSafeCodeDiagnostics(rootEnvironmentUri), []);
+    assert.deepStrictEqual(getSafeCodeDiagnostics(nestedEnvironmentUri), []);
+    assert.strictEqual(
+      vscode.workspace.textDocuments.some((document) => document.uri.toString() === rootEnvironmentUri.toString()),
+      false
+    );
+    assert.strictEqual(
+      vscode.workspace.textDocuments.some((document) => document.uri.toString() === nestedEnvironmentUri.toString()),
+      false
+    );
+
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+    assert.deepStrictEqual(getSafeCodeDiagnostics(rootEnvironmentUri), []);
+    assert.deepStrictEqual(getSafeCodeDiagnostics(nestedEnvironmentUri), []);
+    assert.strictEqual(
+      vscode.workspace.textDocuments.some((document) => document.uri.toString() === rootEnvironmentUri.toString()),
+      false
+    );
+    assert.strictEqual(
+      vscode.workspace.textDocuments.some((document) => document.uri.toString() === nestedEnvironmentUri.toString()),
+      false
+    );
+
+    const rootDocument = await vscode.workspace.openTextDocument(rootEnvironmentUri);
+    const nestedDocument = await vscode.workspace.openTextDocument(nestedEnvironmentUri);
+    await vscode.commands.executeCommand("safeCode.scanOpenFiles");
+    assert.deepStrictEqual(getSafeCodeDiagnostics(rootEnvironmentUri), []);
+    assert.deepStrictEqual(getSafeCodeDiagnostics(nestedEnvironmentUri), []);
+
+    const ignoredEdit = new vscode.WorkspaceEdit();
+    ignoredEdit.replace(
+      rootEnvironmentUri,
+      new vscode.Range(rootDocument.positionAt(0), rootDocument.positionAt(rootDocument.getText().length)),
+      'const apiKey = "open-root-environment-secret";'
+    );
+    ignoredEdit.replace(
+      nestedEnvironmentUri,
+      new vscode.Range(nestedDocument.positionAt(0), nestedDocument.positionAt(nestedDocument.getText().length)),
+      'const token = "open-nested-environment-secret";'
+    );
+    assert.strictEqual(await vscode.workspace.applyEdit(ignoredEdit), true);
+    assert.strictEqual(await rootDocument.save(), true);
+    assert.strictEqual(await nestedDocument.save(), true);
+
+    await vscode.workspace.fs.writeFile(watcherControlUri, Buffer.from("export const clean = true;"));
+    await eventually(() => getSafeCodeDiagnostics(watcherControlUri), (items) => items.length === 0);
+    await vscode.workspace.fs.writeFile(
+      watcherControlUri,
+      Buffer.from('const password = "watcher-control-secret-again";')
+    );
+    await eventually(() => getSafeCodeDiagnostics(watcherControlUri), (items) => items.length === 1);
+
+    assert.deepStrictEqual(getSafeCodeDiagnostics(rootEnvironmentUri), []);
+    assert.deepStrictEqual(getSafeCodeDiagnostics(nestedEnvironmentUri), []);
+  });
+
+  test("clears descendant diagnostics when a directory is renamed to .env", async () => {
+    const firstUri = await createWorkspaceFile(
+      "rename-environment-tree/first.ts",
+      'const apiKey = "first-directory-rename-secret";'
+    );
+    const secondUri = await createWorkspaceFile(
+      "rename-environment-tree/nested/second.ts",
+      'const token = "second-directory-rename-secret";'
+    );
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+    await eventually(() => getSafeCodeDiagnostics(firstUri), (items) => items.length === 1);
+    await eventually(() => getSafeCodeDiagnostics(secondUri), (items) => items.length === 1);
+
+    const sourceDirectory = vscode.Uri.joinPath(runtimeDirectory, "rename-environment-tree");
+    const ignoredDirectory = vscode.Uri.joinPath(runtimeDirectory, ".env");
+    const firstIgnoredUri = vscode.Uri.joinPath(ignoredDirectory, path.basename(firstUri.fsPath));
+    const secondIgnoredUri = vscode.Uri.joinPath(
+      ignoredDirectory,
+      "nested",
+      path.basename(secondUri.fsPath)
+    );
+    await vscode.workspace.fs.rename(sourceDirectory, ignoredDirectory, { overwrite: false });
+    createdWorkspaceFiles = createdWorkspaceFiles.filter((candidate) => {
+      return candidate.toString() !== firstUri.toString() && candidate.toString() !== secondUri.toString();
+    });
+    createdWorkspaceFiles.push(firstIgnoredUri, secondIgnoredUri);
+
+    await eventually(() => getSafeCodeDiagnostics(firstUri), (items) => items.length === 0);
+    await eventually(() => getSafeCodeDiagnostics(secondUri), (items) => items.length === 0);
+    assert.deepStrictEqual(getSafeCodeDiagnostics(firstIgnoredUri), []);
+    assert.deepStrictEqual(getSafeCodeDiagnostics(secondIgnoredUri), []);
+  });
+
+  test("continues scanning .env filenames outside .env directories", async () => {
+    const eligibleDirectory = vscode.Uri.joinPath(runtimeDirectory, "eligible-environment-files");
+    await vscode.workspace.fs.createDirectory(eligibleDirectory);
+    const eligibleUris = [".env", ".env.local", ".env.production", ".env-config.ts"].map((name) => {
+      return vscode.Uri.joinPath(eligibleDirectory, name);
+    });
+    for (const uri of eligibleUris) {
+      await vscode.workspace.fs.writeFile(
+        uri,
+        Buffer.from('const apiKey = "eligible-environment-filename-secret";')
+      );
+      createdWorkspaceFiles.push(uri);
+      await vscode.workspace.openTextDocument(uri);
+    }
+
+    await vscode.commands.executeCommand("safeCode.scanOpenFiles");
+    for (const uri of eligibleUris) {
+      await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+    }
+
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+    for (const uri of eligibleUris) {
+      assert.strictEqual(getSafeCodeDiagnostics(uri).length, 1, uri.fsPath);
+    }
+  });
+
   test("workspace scan respects local warning ignores", async () => {
     const uri = await createWorkspaceFile("ignored-warning.ts", 'const apiKey = "ignored-workspace-secret";');
     const document = await vscode.workspace.openTextDocument(uri);
@@ -577,8 +737,82 @@ suite("Safe Code extension", () => {
     assert.strictEqual(document.getText(), "export const clientSecret = process.env.CLIENT_SECRET;");
     assert.strictEqual(await readWorkspaceText(environmentUri), `CLIENT_SECRET=${JSON.stringify(secretValue)}\n`);
     assert.strictEqual(await readWorkspaceText(environmentExampleUri), "CLIENT_SECRET=\n");
-    assert.strictEqual(await readWorkspaceText(gitIgnoreUri), ".env\n");
+    assert.strictEqual(await readWorkspaceText(gitIgnoreUri), "/.safe-code-tmp-*\n/.env\n");
     assert.ok(!(await readWorkspaceText(environmentExampleUri)).includes(secretValue));
+  });
+
+  test("rejects a stale environment action before changing any target", async () => {
+    const uri = await createWorkspaceFile(
+      "stale-environment-fix.ts",
+      'export const clientSecret = "stale-environment-secret";'
+    );
+    const document = await vscode.workspace.openTextDocument(uri);
+    const editor = await vscode.window.showTextDocument(document);
+    await vscode.commands.executeCommand("safeCode.scanOpenFiles");
+    const diagnostics = await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+    const actions = await requestCodeActions(uri, diagnostics[0].range);
+    const environmentAction = actions.find((candidate): candidate is vscode.CodeAction => {
+      return candidate instanceof vscode.CodeAction && candidate.title === "Safe Code: Move value to .env";
+    });
+    assert.ok(environmentAction?.command, "The environment quick fix was not returned");
+
+    assert.strictEqual(
+      await editor.edit((builder) => {
+        builder.replace(
+          new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)),
+          "export const clientSecret = getSecretAtRuntime();"
+        );
+      }),
+      true
+    );
+    assert.strictEqual(await document.save(), true);
+
+    await vscode.commands.executeCommand(
+      environmentAction.command.command,
+      ...(environmentAction.command.arguments ?? [])
+    );
+
+    assert.strictEqual(document.getText(), "export const clientSecret = getSecretAtRuntime();");
+    assert.strictEqual(await workspaceFileExists(environmentUri), false);
+    assert.strictEqual(await workspaceFileExists(environmentExampleUri), false);
+    assert.strictEqual(await workspaceFileExists(gitIgnoreUri), false);
+  });
+
+  test("serializes two environment migrations in the same workspace", async () => {
+    const firstSecret = `first-serialized-${Date.now()}`;
+    const secondSecret = `second-serialized-${Date.now()}`;
+    const firstUri = await createWorkspaceFile("serialized-first.ts", `const firstToken = "${firstSecret}";`);
+    const secondUri = await createWorkspaceFile("serialized-second.ts", `const secondToken = "${secondSecret}";`);
+    const firstDocument = await vscode.workspace.openTextDocument(firstUri);
+    const secondDocument = await vscode.workspace.openTextDocument(secondUri);
+    await vscode.window.showTextDocument(firstDocument);
+    await vscode.window.showTextDocument(secondDocument);
+    await vscode.commands.executeCommand("safeCode.scanOpenFiles");
+
+    const firstDiagnostics = await eventually(() => getSafeCodeDiagnostics(firstUri), (items) => items.length === 1);
+    const secondDiagnostics = await eventually(() => getSafeCodeDiagnostics(secondUri), (items) => items.length === 1);
+    const firstActions = await requestCodeActions(firstUri, firstDiagnostics[0].range);
+    const secondActions = await requestCodeActions(secondUri, secondDiagnostics[0].range);
+    const firstAction = firstActions.find((candidate): candidate is vscode.CodeAction => {
+      return candidate instanceof vscode.CodeAction && candidate.title === "Safe Code: Move value to .env";
+    });
+    const secondAction = secondActions.find((candidate): candidate is vscode.CodeAction => {
+      return candidate instanceof vscode.CodeAction && candidate.title === "Safe Code: Move value to .env";
+    });
+    assert.ok(firstAction?.command && secondAction?.command, "Both environment quick fixes must be available");
+
+    await Promise.all([
+      vscode.commands.executeCommand(firstAction.command.command, ...(firstAction.command.arguments ?? [])),
+      vscode.commands.executeCommand(secondAction.command.command, ...(secondAction.command.arguments ?? []))
+    ]);
+
+    assert.strictEqual(firstDocument.getText(), "const firstToken = process.env.FIRST_TOKEN;");
+    assert.strictEqual(secondDocument.getText(), "const secondToken = process.env.SECOND_TOKEN;");
+    const environmentText = await readWorkspaceText(environmentUri);
+    assert.ok(environmentText.includes(`FIRST_TOKEN=${JSON.stringify(firstSecret)}\n`));
+    assert.ok(environmentText.includes(`SECOND_TOKEN=${JSON.stringify(secondSecret)}\n`));
+    assert.strictEqual(await readWorkspaceText(environmentExampleUri), "FIRST_TOKEN=\nSECOND_TOKEN=\n");
+    assert.strictEqual(await readWorkspaceText(gitIgnoreUri), "/.safe-code-tmp-*\n/.env\n");
   });
 
   test("does not offer the environment fix for ambiguous or unsupported assignments", async () => {
@@ -647,6 +881,16 @@ suite("Safe Code extension", () => {
     return uri;
   }
 
+  async function createWorkspaceRootFile(fileName: string, content: string): Promise<vscode.Uri> {
+    const relativeDirectory = path.posix.dirname(fileName);
+    const uniqueFileName = `${Date.now()}-${path.posix.basename(fileName)}`;
+    const uri = vscode.Uri.joinPath(workspaceRoot, relativeDirectory, uniqueFileName);
+    await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(uri.fsPath)));
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
+    createdWorkspaceFiles.push(uri);
+    return uri;
+  }
+
   async function createWorkspaceFileWithExactBaseName(fileName: string, content: string): Promise<vscode.Uri> {
     const uniqueDirectory = vscode.Uri.joinPath(runtimeDirectory, `exact-${Date.now()}-${createdWorkspaceFiles.length}`);
     await vscode.workspace.fs.createDirectory(uniqueDirectory);
@@ -704,7 +948,7 @@ function isDocumentOpen(uri: vscode.Uri): boolean {
 
 async function deleteIfExists(uri: vscode.Uri): Promise<void> {
   try {
-    await vscode.workspace.fs.delete(uri, { useTrash: false });
+    await vscode.workspace.fs.delete(uri, { recursive: true, useTrash: false });
   } catch (error) {
     if (!(error instanceof vscode.FileSystemError) || error.code !== "FileNotFound") {
       throw error;
@@ -714,6 +958,18 @@ async function deleteIfExists(uri: vscode.Uri): Promise<void> {
 
 async function readWorkspaceText(uri: vscode.Uri): Promise<string> {
   return Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8");
+}
+
+async function workspaceFileExists(uri: vscode.Uri): Promise<boolean> {
+  try {
+    await vscode.workspace.fs.stat(uri);
+    return true;
+  } catch (error) {
+    if (error instanceof vscode.FileSystemError && error.code === "FileNotFound") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function requestCodeActions(

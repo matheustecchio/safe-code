@@ -116,6 +116,24 @@ suite("workspace scan core", () => {
     assert.strictEqual(queue.trackedSize, 0);
   });
 
+  test("removes only matching queued and active URI guards", () => {
+    const queue = new BoundedScanQueue<number>(4);
+    queue.enqueue("file:///deleted/queued.ts", 1);
+    queue.enqueue("file:///retained.ts", 2);
+    const activeVersion = queue.begin("file:///deleted/active.ts");
+
+    const removed = queue.removeWhere((key) => key.startsWith("file:///deleted/"));
+
+    assert.strictEqual(removed, 2);
+    assert.strictEqual(queue.size, 1);
+    assert.strictEqual(queue.trackedSize, 1);
+    assert.strictEqual(queue.isCurrent("file:///deleted/active.ts", activeVersion), false);
+    const retained = queue.shift();
+    assert.ok(retained);
+    assert.strictEqual(retained.key, "file:///retained.ts");
+    assert.strictEqual(queue.isCurrent(retained.key, retained.version), true);
+  });
+
   test("accepts exact file and workspace budget limits", () => {
     const budget = new WorkspaceScanBudget({
       maxFileSizeBytes: 8,

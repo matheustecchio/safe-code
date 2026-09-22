@@ -1,10 +1,23 @@
+import * as path from "path";
 import * as vscode from "vscode";
 import {
   analyzeEnvironmentAssignment,
-  EnvironmentVariableConflictError,
+  EnvironmentAssignment,
   isSupportedEnvironmentFixFile
 } from "./environmentFixCore";
-import { EnvironmentStore } from "./environmentStore";
+import {
+  AppliedEnvironmentMigrationError,
+  EnvironmentMigrationCoordinator,
+  EnvironmentMigrationError,
+  EnvironmentMigrationMutation,
+  EnvironmentMigrationStep,
+  getEnvironmentMigrationMessage
+} from "./environmentMigrationCore";
+import {
+  assertSafeMigrationSource,
+  EnvironmentStore,
+  getEnvironmentWorkspaceIdentity
+} from "./environmentStore";
 import { IgnoreStore } from "./ignoreStore";
 import {
   getProjectIgnoreFileErrorMessage,
@@ -61,6 +74,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const output = vscode.window.createOutputChannel("Safe Code");
   const ignoreStore = new IgnoreStore(context.workspaceState);
   const projectIgnoreStore = new ProjectIgnoreStore(output);
+  const environmentMigrationCoordinator = new EnvironmentMigrationCoordinator();
   const pendingScans = new BoundedScanQueue<PendingScan>();
   const diagnosticUris = new Map<string, vscode.Uri>();
   const workspaceScanOpeningUris = new Set<string>();
@@ -140,9 +154,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const isUriScanCurrent = (uri: vscode.Uri, version: number): boolean =>
     pendingScans.isCurrent(uri.toString(), version);
 
-  const removeDiagnostics = (uri: vscode.Uri): void => {
-    pendingScans.remove(uri.toString());
+  const removeDiagnostics = (uri: vscode.Uri, includeDescendants = false): void => {
+    if (includeDescendants) {
+      pendingScans.removeWhere((key) => isSameOrDescendantUri(uri, vscode.Uri.parse(key), true));
+    } else {
+      pendingScans.remove(uri.toString());
+    }
     deleteDiagnostic(uri);
+
+    if (includeDescendants) {
+      for (const [key, diagnosticUri] of diagnosticUris) {
+        if (isSameOrDescendantUri(uri, diagnosticUri, true)) {
+          deleteDiagnostic(diagnosticUri);
+          diagnosticUris.delete(key);
+        }
+      }
+    }
   };
 
   const getOpenDocument = (uri: vscode.Uri): vscode.TextDocument | undefined => {
@@ -685,7 +712,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return;
     }
 
-    removeDiagnostics(uri);
+    removeDiagnostics(uri, true);
   };
 
   const fileWatcher = vscode.workspace.createFileSystemWatcher("**/*");
@@ -738,16 +765,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ),
     vscode.commands.registerCommand(
       moveSecretToEnvCommand,
-      async (uri: vscode.Uri, range: vscode.Range, ruleId: string) => {
+      async (uri: vscode.Uri, range: vscode.Range, ruleId: string, expectedVersion: number) => {
         try {
-          await moveSecretToEnvironment(uri, range, ruleId);
+          await vscode.window.withProgress(
+            {
+              cancellable: true,
+              location: vscode.ProgressLocation.Notification,
+              title: "Safe Code: Moving value to .env"
+            },
+            async (_progress, token) => {
+              await moveSecretToEnvironment(
+                uri,
+                range,
+                ruleId,
+                expectedVersion,
+                token,
+                environmentMigrationCoordinator
+              );
+            }
+          );
         } catch (error) {
-          const message =
-            error instanceof EnvironmentVariableConflictError
-              ? `Safe Code did not move the secret: ${error.message}`
-              : `Safe Code could not move the secret to .env: ${String(error)}`;
+          const message = getEnvironmentMigrationMessage(error);
           output.appendLine(message);
-          void vscode.window.showErrorMessage(message);
+          if (error instanceof EnvironmentMigrationError && error.code === "cancelled") {
+            void vscode.window.showInformationMessage(message);
+          } else {
+            void vscode.window.showErrorMessage(message);
+          }
         }
       }
     ),
@@ -938,53 +982,283 @@ function createEnvironmentCodeAction(
   action.command = {
     command: moveSecretToEnvCommand,
     title: "Move value to .env",
-    arguments: [document.uri, diagnostic.range, ruleId]
+    arguments: [document.uri, diagnostic.range, ruleId, document.version]
   };
   action.diagnostics = [diagnostic];
   return action;
 }
 
-async function moveSecretToEnvironment(uri: vscode.Uri, range: vscode.Range, ruleId: string): Promise<void> {
-  if (ruleId !== "generic-secret-assignment" || range.start.line !== range.end.line) {
-    return;
+async function moveSecretToEnvironment(
+  uri: vscode.Uri,
+  range: vscode.Range,
+  ruleId: string,
+  expectedVersion: number,
+  cancellation: vscode.CancellationToken,
+  coordinator: EnvironmentMigrationCoordinator
+): Promise<void> {
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+  if (
+    ruleId !== "generic-secret-assignment" ||
+    range.start.line !== range.end.line ||
+    uri.scheme !== "file" ||
+    workspaceFolder?.uri.scheme !== "file" ||
+    !Number.isSafeInteger(expectedVersion)
+  ) {
+    throw new EnvironmentMigrationError("invalid-source");
   }
 
+  const workspaceIdentity = await getEnvironmentWorkspaceIdentity(workspaceFolder.uri.fsPath);
+  const environmentStore = new EnvironmentStore(
+    workspaceFolder.uri.fsPath,
+    {},
+    workspaceIdentity.identity
+  );
+  let source: PreparedSourceMigration | undefined;
+
+  await coordinator.run(
+    workspaceIdentity.key,
+    {
+      prepare: async () => {
+        source = await prepareSourceMigration(uri, range, expectedVersion, workspaceFolder.uri.fsPath);
+        assertEnvironmentTargetsAreNotDirty(workspaceFolder);
+        await environmentStore.prepare(
+          source.assignment.environmentVariableName,
+          source.assignment.secretValue
+        );
+      },
+      beforeStep: async (step) => {
+        if (!source) {
+          throw new EnvironmentMigrationError("invalid-source");
+        }
+        assertEnvironmentTargetsAreNotDirty(workspaceFolder);
+        await validatePreparedSource(source, false);
+        await environmentStore.beforeStep(step);
+      },
+      apply: async (step) => {
+        if (!source) {
+          throw new EnvironmentMigrationError("invalid-source");
+        }
+        if (step === "source") {
+          assertEnvironmentTargetsAreNotDirty(workspaceFolder);
+          await environmentStore.beforeStep("source");
+          return await applySourceMigration(source);
+        }
+        return await environmentStore.apply(step);
+      },
+      verify: async () => {
+        if (!source) {
+          throw new EnvironmentMigrationError("invalid-source");
+        }
+        assertEnvironmentTargetsAreNotDirty(workspaceFolder);
+        await environmentStore.verify();
+        await validatePreparedSource(source, true);
+      }
+    },
+    cancellation
+  );
+}
+
+type PreparedSourceMigration = {
+  afterLineText: string;
+  afterVersion?: number;
+  assignment: EnvironmentAssignment;
+  beforeLineText: string;
+  beforeVersion: number;
+  document: vscode.TextDocument;
+  range: vscode.Range;
+  uri: vscode.Uri;
+  workspaceRoot: string;
+};
+
+async function prepareSourceMigration(
+  uri: vscode.Uri,
+  range: vscode.Range,
+  expectedVersion: number,
+  workspaceRoot: string
+): Promise<PreparedSourceMigration> {
+  await assertSafeMigrationSource(workspaceRoot, uri.fsPath);
   const document = await vscode.workspace.openTextDocument(uri);
   if (
+    document.version !== expectedVersion ||
     range.start.line < 0 ||
     range.start.line >= document.lineCount ||
     !isSupportedEnvironmentFixFile(document.fileName)
   ) {
-    return;
+    throw new EnvironmentMigrationError("invalid-source");
   }
 
-  const line = document.lineAt(range.start.line);
-  const assignment = analyzeEnvironmentAssignment(line.text, range.start.character, range.end.character);
-  if (!assignment) {
-    return;
-  }
-
-  const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
-  if (!workspaceFolder) {
-    return;
-  }
-
-  const environmentStore = new EnvironmentStore(workspaceFolder);
-  await environmentStore.write(assignment.environmentVariableName, assignment.secretValue);
-
-  const sourceEdit = new vscode.WorkspaceEdit();
-  sourceEdit.replace(
-    uri,
-    new vscode.Range(
-      range.start.line,
-      assignment.replacementStartCharacter,
-      range.start.line,
-      assignment.replacementEndCharacter
-    ),
-    assignment.replacement
+  const beforeLineText = document.lineAt(range.start.line).text;
+  const assignment = analyzeEnvironmentAssignment(
+    beforeLineText,
+    range.start.character,
+    range.end.character
   );
-  if (!(await vscode.workspace.applyEdit(sourceEdit))) {
-    throw new Error("VS Code rejected the source edit. The environment files were preserved.");
+  if (!assignment) {
+    throw new EnvironmentMigrationError("invalid-source");
+  }
+
+  return {
+    afterLineText:
+      beforeLineText.slice(0, assignment.replacementStartCharacter) +
+      assignment.replacement +
+      beforeLineText.slice(assignment.replacementEndCharacter),
+    assignment,
+    beforeLineText,
+    beforeVersion: expectedVersion,
+    document,
+    range,
+    uri,
+    workspaceRoot
+  };
+}
+
+async function validatePreparedSource(source: PreparedSourceMigration, expectApplied: boolean): Promise<void> {
+  await assertSafeMigrationSource(source.workspaceRoot, source.uri.fsPath);
+  const document = await vscode.workspace.openTextDocument(source.uri);
+  const expectedVersion = expectApplied ? source.afterVersion : source.beforeVersion;
+  const expectedLineText = expectApplied ? source.afterLineText : source.beforeLineText;
+  if (
+    document !== source.document ||
+    document.version !== expectedVersion ||
+    source.range.start.line < 0 ||
+    source.range.start.line >= document.lineCount ||
+    document.lineAt(source.range.start.line).text !== expectedLineText
+  ) {
+    throw new EnvironmentMigrationError("concurrent-change");
+  }
+
+  if (!expectApplied) {
+    const assignment = analyzeEnvironmentAssignment(
+      expectedLineText,
+      source.range.start.character,
+      source.range.end.character
+    );
+    if (
+      !assignment ||
+      assignment.environmentVariableName !== source.assignment.environmentVariableName ||
+      assignment.secretValue !== source.assignment.secretValue ||
+      assignment.replacementStartCharacter !== source.assignment.replacementStartCharacter ||
+      assignment.replacementEndCharacter !== source.assignment.replacementEndCharacter
+    ) {
+      throw new EnvironmentMigrationError("invalid-source");
+    }
+  }
+}
+
+async function applySourceMigration(source: PreparedSourceMigration): Promise<EnvironmentMigrationMutation> {
+  await validatePreparedSource(source, false);
+  const replacementRange = new vscode.Range(
+    source.range.start.line,
+    source.assignment.replacementStartCharacter,
+    source.range.start.line,
+    source.assignment.replacementEndCharacter
+  );
+  const sourceEdit = new vscode.WorkspaceEdit();
+  sourceEdit.replace(source.uri, replacementRange, source.assignment.replacement);
+
+  try {
+    const accepted = await vscode.workspace.applyEdit(sourceEdit);
+    if (!accepted) {
+      throw new EnvironmentMigrationError("source-edit-failed");
+    }
+  } catch (error) {
+    const mutation = detectAppliedSourceMutation(source);
+    if (mutation) {
+      throw new AppliedEnvironmentMigrationError(
+        mutation,
+        new EnvironmentMigrationError("source-edit-failed", { cause: error })
+      );
+    }
+    if (source.document.version !== source.beforeVersion) {
+      throw new AppliedEnvironmentMigrationError(
+        createUnrecoverableSourceMutation(),
+        new EnvironmentMigrationError("rollback-failed", { cause: error })
+      );
+    }
+    if (error instanceof EnvironmentMigrationError) {
+      throw error;
+    }
+    throw new EnvironmentMigrationError("source-edit-failed", { cause: error });
+  }
+
+  const mutation = detectAppliedSourceMutation(source);
+  if (!mutation) {
+    if (source.document.version !== source.beforeVersion) {
+      throw new AppliedEnvironmentMigrationError(
+        createUnrecoverableSourceMutation(),
+        new EnvironmentMigrationError("rollback-failed")
+      );
+    }
+    throw new EnvironmentMigrationError("source-edit-failed");
+  }
+  return mutation;
+}
+
+function createUnrecoverableSourceMutation(): EnvironmentMigrationMutation {
+  return {
+    step: "source",
+    rollback: async () => {
+      throw new EnvironmentMigrationError("rollback-failed");
+    },
+    verify: async () => {
+      throw new EnvironmentMigrationError("rollback-failed");
+    }
+  };
+}
+
+function detectAppliedSourceMutation(source: PreparedSourceMigration): EnvironmentMigrationMutation | undefined {
+  if (
+    source.range.start.line >= source.document.lineCount ||
+    source.document.lineAt(source.range.start.line).text !== source.afterLineText ||
+    source.document.version === source.beforeVersion
+  ) {
+    return undefined;
+  }
+
+  source.afterVersion = source.document.version;
+  return createSourceMutation(source);
+}
+
+function createSourceMutation(source: PreparedSourceMigration): EnvironmentMigrationMutation {
+  const quotedValue = source.beforeLineText.slice(
+    source.assignment.replacementStartCharacter,
+    source.assignment.replacementEndCharacter
+  );
+
+  return {
+    step: "source",
+    rollback: async () => {
+      await validatePreparedSource(source, true);
+      const inverseEdit = new vscode.WorkspaceEdit();
+      inverseEdit.replace(
+        source.uri,
+        new vscode.Range(
+          source.range.start.line,
+          source.assignment.replacementStartCharacter,
+          source.range.start.line,
+          source.assignment.replacementStartCharacter + source.assignment.replacement.length
+        ),
+        quotedValue
+      );
+      if (!(await vscode.workspace.applyEdit(inverseEdit))) {
+        throw new EnvironmentMigrationError("rollback-failed");
+      }
+      if (source.document.lineAt(source.range.start.line).text !== source.beforeLineText) {
+        throw new EnvironmentMigrationError("rollback-failed");
+      }
+    },
+    verify: async () => {
+      await validatePreparedSource(source, true);
+    }
+  };
+}
+
+function assertEnvironmentTargetsAreNotDirty(workspaceFolder: vscode.WorkspaceFolder): void {
+  const protectedUris = new Set(
+    [".gitignore", ".env", ".env.example"].map((name) => vscode.Uri.joinPath(workspaceFolder.uri, name).toString())
+  );
+  if (vscode.workspace.textDocuments.some((document) => document.isDirty && protectedUris.has(document.uri.toString()))) {
+    throw new EnvironmentMigrationError("unsafe-target");
   }
 }
 
@@ -1036,4 +1310,27 @@ function createExcludeGlob(ignoredPaths: string[]): string | undefined {
   }
 
   return patterns.length === 1 ? patterns[0] : `{${patterns.join(",")}}`;
+}
+
+function isSameOrDescendantUri(
+  parent: vscode.Uri,
+  candidate: vscode.Uri,
+  includeDescendants: boolean
+): boolean {
+  if (candidate.toString() === parent.toString()) {
+    return true;
+  }
+  if (
+    !includeDescendants ||
+    parent.scheme !== candidate.scheme ||
+    parent.authority !== candidate.authority
+  ) {
+    return false;
+  }
+
+  const relativePath = path.relative(parent.fsPath, candidate.fsPath);
+  return relativePath.length > 0 &&
+    relativePath !== ".." &&
+    !relativePath.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relativePath);
 }

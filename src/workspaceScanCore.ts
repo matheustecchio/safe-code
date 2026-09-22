@@ -78,6 +78,18 @@ export class BoundedScanQueue<T> {
     return this.items.delete(key);
   }
 
+  public removeWhere(predicate: (key: string) => boolean): number {
+    let removed = 0;
+    for (const key of this.activeVersions.keys()) {
+      if (predicate(key)) {
+        this.activeVersions.delete(key);
+        this.items.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
   public begin(key: string): number {
     const version = this.createVersion();
     this.activeVersions.set(key, version);

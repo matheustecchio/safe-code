@@ -97,7 +97,11 @@ export function upsertEnvironmentValue(
 }
 
 export function upsertEnvironmentExample(content: string, environmentVariableName: string): string {
-  if (findEnvironmentVariableLines(content, environmentVariableName).length > 0) {
+  const existingLines = findEnvironmentVariableLines(content, environmentVariableName);
+  if (existingLines.length > 1) {
+    throw new EnvironmentVariableConflictError(environmentVariableName);
+  }
+  if (existingLines.length === 1) {
     return content;
   }
 
@@ -105,12 +109,17 @@ export function upsertEnvironmentExample(content: string, environmentVariableNam
 }
 
 export function ensureEnvironmentFileIgnored(content: string): string {
-  const alreadyIgnored = content.split(/\r?\n/).some((line) => {
-    const normalized = line.trim();
-    return normalized === ".env" || normalized === "/.env";
-  });
+  const effectiveRules = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+  const finalRules = effectiveRules.slice(-2);
 
-  return alreadyIgnored ? content : appendLine(content, ".env");
+  if (finalRules[0] === "/.safe-code-tmp-*" && finalRules[1] === "/.env") {
+    return content;
+  }
+
+  return appendLine(appendLine(content, "/.safe-code-tmp-*"), "/.env");
 }
 
 function findEnvironmentVariableLines(content: string, environmentVariableName: string): string[] {
