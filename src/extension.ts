@@ -156,7 +156,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const removeDiagnostics = (uri: vscode.Uri, includeDescendants = false): void => {
     if (includeDescendants) {
-      pendingScans.clear();
+      pendingScans.removeWhere((key) => isSameOrDescendantUri(uri, vscode.Uri.parse(key), true));
     } else {
       pendingScans.remove(uri.toString());
     }
