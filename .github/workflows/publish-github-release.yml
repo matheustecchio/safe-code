@@ -14,16 +14,27 @@ on:
         required: false
         default: ""
         type: string
+      recover_1_0_0:
+        description: Recover the recorded ambiguous 1.0.0 Marketplace attempt (incident only)
+        required: true
+        default: false
+        type: boolean
+      recovery_confirmation_reference:
+        description: Authoritative Marketplace non-acceptance confirmation reference
+        required: false
+        default: ""
+        type: string
 
 permissions: {}
 
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && 'publish-github-release' || format('publish-github-release-dry-run-{0}', github.run_id) }}
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.recover_1_0_0 && 'recover-marketplace-1.0.0' || github.event_name == 'workflow_dispatch' && inputs.publish && 'publish-github-release' || format('publish-github-release-dry-run-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
   build:
     name: Build and verify release artifact
+    if: ${{ !inputs.recover_1_0_0 }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
@@ -99,7 +110,7 @@ jobs:
 
   publish-marketplace:
     name: Publish exact VSIX to Marketplace
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && !inputs.recover_1_0_0 }}
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -163,7 +174,7 @@ jobs:
 
   publish-github:
     name: Publish exact assets to GitHub
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && !inputs.recover_1_0_0 }}
     needs:
       - build
       - publish-marketplace
@@ -206,3 +217,219 @@ jobs:
           SOURCE_COMMIT: ${{ github.sha }}
           WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: node scripts/release-helper.mjs publish-github
+
+  recovery-preflight:
+    name: Verify recorded 1.0.0 incident and persist decision
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recover_1_0_0 && !inputs.publish }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Check out reviewed recovery code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.2
+          cache: npm
+
+      - name: Install pinned recovery tools
+        run: npm ci --ignore-scripts
+
+      - name: Download original three-file release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: 10773757838
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/safe-code-release
+          repository: matheustecchio/safe-code
+          run-id: 35912409247
+
+      - name: Download original Marketplace attempt receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: 10772978663
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/safe-code-marketplace-attempt
+          repository: matheustecchio/safe-code
+          run-id: 35912409247
+
+      - name: Verify incident provenance and prepare recovery decision
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_TOKEN: ${{ github.token }}
+          MARKETPLACE_ATTEMPT_DIRECTORY: ${{ runner.temp }}/safe-code-marketplace-attempt
+          PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
+          RECOVERY: ${{ inputs.recover_1_0_0 && 'true' || 'false' }}
+          RECOVERY_CODE_COMMIT: ${{ github.sha }}
+          RECOVERY_CONFIRMATION_REFERENCE: ${{ inputs.recovery_confirmation_reference }}
+          RECOVERY_DECISION_DIRECTORY: ${{ runner.temp }}/safe-code-recovery-decision
+          RELEASE_DIRECTORY: ${{ runner.temp }}/safe-code-release
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+        run: node scripts/release-helper.mjs prepare-recovery-decision
+
+      - name: Persist immutable recovery decision before publisher access
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: safe-code-recovery-decision-35912409247
+          path: ${{ runner.temp }}/safe-code-recovery-decision/marketplace-recovery-decision.json
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: false
+          retention-days: 30
+
+  recovery-marketplace:
+    name: Recover exact 1.0.0 VSIX to Marketplace once
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recover_1_0_0 && !inputs.publish }}
+    needs: recovery-preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment: marketplace
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out reviewed recovery code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.2
+          cache: npm
+
+      - name: Install pinned publisher
+        run: npm ci --ignore-scripts
+
+      - name: Download original three-file release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: 10773757838
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/safe-code-release
+          repository: matheustecchio/safe-code
+          run-id: 35912409247
+
+      - name: Download original Marketplace attempt receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: 10772978663
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/safe-code-marketplace-attempt
+          repository: matheustecchio/safe-code
+          run-id: 35912409247
+
+      - name: Download persisted recovery decision
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: safe-code-recovery-decision-35912409247
+          path: ${{ runner.temp }}/safe-code-recovery-decision
+
+      - name: Diagnose exact trusted-publisher policy without uploading
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_TOKEN: ${{ github.token }}
+          MARKETPLACE_ATTEMPT_DIRECTORY: ${{ runner.temp }}/safe-code-marketplace-attempt
+          OIDC_DIAGNOSTIC_FILE: ${{ runner.temp }}/marketplace-oidc-diagnostic.json
+          PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
+          RECOVERY: ${{ inputs.recover_1_0_0 && 'true' || 'false' }}
+          RECOVERY_CODE_COMMIT: ${{ github.sha }}
+          RECOVERY_CONFIRMATION_REFERENCE: ${{ inputs.recovery_confirmation_reference }}
+          RECOVERY_DECISION_DIRECTORY: ${{ runner.temp }}/safe-code-recovery-decision
+          RELEASE_DIRECTORY: ${{ runner.temp }}/safe-code-release
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+        run: node scripts/release-helper.mjs diagnose-recovery-oidc
+
+      - name: Publish the verified original VSIX exactly once
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_TOKEN: ${{ github.token }}
+          MARKETPLACE_ATTEMPT_DIRECTORY: ${{ runner.temp }}/safe-code-marketplace-attempt
+          OIDC_DIAGNOSTIC_FILE: ${{ runner.temp }}/marketplace-oidc-diagnostic.json
+          PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
+          RECOVERY: ${{ inputs.recover_1_0_0 && 'true' || 'false' }}
+          RECOVERY_CODE_COMMIT: ${{ github.sha }}
+          RECOVERY_CONFIRMATION_REFERENCE: ${{ inputs.recovery_confirmation_reference }}
+          RECOVERY_DECISION_DIRECTORY: ${{ runner.temp }}/safe-code-recovery-decision
+          RELEASE_DIRECTORY: ${{ runner.temp }}/safe-code-release
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+        run: node scripts/release-helper.mjs publish-recovery-marketplace
+
+  recovery-github:
+    name: Publish original 1.0.0 assets to GitHub
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recover_1_0_0 && !inputs.publish }}
+    needs: recovery-marketplace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Check out reviewed recovery code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.2
+
+      - name: Download original three-file release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: 10773757838
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/safe-code-release
+          repository: matheustecchio/safe-code
+          run-id: 35912409247
+
+      - name: Download original Marketplace attempt receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: 10772978663
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/safe-code-marketplace-attempt
+          repository: matheustecchio/safe-code
+          run-id: 35912409247
+
+      - name: Download persisted recovery decision
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: safe-code-recovery-decision-35912409247
+          path: ${{ runner.temp }}/safe-code-recovery-decision
+
+      - name: Verify Marketplace visibility and publish original GitHub assets
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_TOKEN: ${{ github.token }}
+          MARKETPLACE_ATTEMPT_DIRECTORY: ${{ runner.temp }}/safe-code-marketplace-attempt
+          PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
+          RECOVERY: ${{ inputs.recover_1_0_0 && 'true' || 'false' }}
+          RECOVERY_CODE_COMMIT: ${{ github.sha }}
+          RECOVERY_CONFIRMATION_REFERENCE: ${{ inputs.recovery_confirmation_reference }}
+          RECOVERY_DECISION_DIRECTORY: ${{ runner.temp }}/safe-code-recovery-decision
+          RELEASE_DIRECTORY: ${{ runner.temp }}/safe-code-release
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+        run: node scripts/release-helper.mjs publish-recovery-github

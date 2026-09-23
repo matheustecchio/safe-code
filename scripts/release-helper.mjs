@@ -18,6 +18,24 @@ export const PINNED_NODE_VERSION = "22.23.2";
 export const PINNED_VSCE_VERSION = "4.0.0";
 export const MAX_MARKETPLACE_WAIT_MS = 15 * 60 * 1000;
 export const MARKETPLACE_ATTEMPT_FILE = "marketplace-publication-attempt.json";
+export const RECOVERY_DECISION_FILE = "marketplace-recovery-decision.json";
+export const RECOVERY_INCIDENT = Object.freeze({
+  repository: "matheustecchio/safe-code",
+  extensionId: "matheus-tecchio.safe-code",
+  publisher: "matheus-tecchio",
+  version: "1.0.0",
+  sourceCommit: "6d963b58d8fce12511538fa86548b2e77b3bce21",
+  sourceWorkflowRunId: "35912409247",
+  sourceWorkflowRunAttempt: "1",
+  sourceWorkflowRef: "refs/heads/main",
+  bundleArtifactId: "10773757838",
+  bundleArtifactName: "safe-code-release-35912409247-1",
+  attemptArtifactId: "10772978663",
+  attemptArtifactName: "safe-code-marketplace-attempt-35912409247-1",
+  assetFile: "safe-code-1.0.0.vsix",
+  sha256: "914c44d330bea2ed54fc54b90ec88b94f4092535d7b0b6864b9a7cfbefa5dede",
+  decisionArtifactName: "safe-code-recovery-decision-35912409247",
+});
 
 const MAX_JSON_BYTES = 1024 * 1024;
 const MAX_ASSET_BYTES = 512 * 1024 * 1024;
@@ -33,6 +51,7 @@ const MANIFEST_FILE = "release-manifest.json";
 const GITHUB_API_ORIGIN = "https://api.github.com";
 const GITHUB_UPLOAD_ORIGIN = "https://uploads.github.com";
 const MARKETPLACE_ORIGIN = "https://marketplace.visualstudio.com";
+const MAX_DIAGNOSTIC_CHARACTERS = 2_000;
 const responseTimeouts = new WeakMap();
 
 const manifestKeys = [
@@ -51,6 +70,37 @@ const manifestKeys = [
   "sha256",
   "checksumFile",
   "manifestFile",
+];
+
+const attemptReceiptKeys = [
+  "schemaVersion",
+  "kind",
+  "repository",
+  "sourceCommit",
+  "workflowRunId",
+  "workflowRunAttempt",
+  "extensionId",
+  "version",
+  "assetFile",
+  "sha256",
+];
+
+const recoveryDecisionKeys = [
+  "schemaVersion",
+  "kind",
+  "confirmationReference",
+  "repository",
+  "extensionId",
+  "version",
+  "sourceCommit",
+  "sourceWorkflowRunId",
+  "sourceWorkflowRunAttempt",
+  "bundleArtifactId",
+  "attemptArtifactId",
+  "sha256",
+  "recoveryWorkflowRunId",
+  "recoveryWorkflowRunAttempt",
+  "recoveryCodeCommit",
 ];
 
 function fail(message) {
@@ -228,6 +278,164 @@ export async function verifyReleaseBundle(directory, expected = {}) {
   const checksumText = await readFile(path.join(directory, manifest.checksumFile), "utf8");
   assert(checksumText === `${manifest.sha256}  ${manifest.assetFile}\n`, "checksum file is not canonical or does not match the VSIX");
   return manifest;
+}
+
+function validateRecoveryManifest(manifest) {
+  validateManifestShape(manifest);
+  const expected = {
+    repository: RECOVERY_INCIDENT.repository,
+    extensionId: RECOVERY_INCIDENT.extensionId,
+    version: RECOVERY_INCIDENT.version,
+    tag: `v${RECOVERY_INCIDENT.version}`,
+    sourceCommit: RECOVERY_INCIDENT.sourceCommit,
+    workflowRunId: RECOVERY_INCIDENT.sourceWorkflowRunId,
+    assetFile: RECOVERY_INCIDENT.assetFile,
+    sha256: RECOVERY_INCIDENT.sha256,
+  };
+  for (const [field, value] of Object.entries(expected)) {
+    assert(manifest[field] === value, `recovery release manifest ${field} does not match the recorded incident`);
+  }
+  return manifest;
+}
+
+export async function verifyRecoveryBundle(directory) {
+  return validateRecoveryManifest(await verifyReleaseBundle(directory, {
+    repository: RECOVERY_INCIDENT.repository,
+    sourceCommit: RECOVERY_INCIDENT.sourceCommit,
+    workflowRunId: RECOVERY_INCIDENT.sourceWorkflowRunId,
+    version: RECOVERY_INCIDENT.version,
+    nodeVersion: PINNED_NODE_VERSION,
+    vsceVersion: PINNED_VSCE_VERSION,
+  }));
+}
+
+function validateMarketplaceAttemptReceipt(receipt, manifest) {
+  assertExactKeys(receipt, attemptReceiptKeys, "Marketplace attempt receipt");
+  const expected = {
+    schemaVersion: RELEASE_SCHEMA_VERSION,
+    kind: "marketplace-publication-attempt",
+    repository: RECOVERY_INCIDENT.repository,
+    sourceCommit: RECOVERY_INCIDENT.sourceCommit,
+    workflowRunId: RECOVERY_INCIDENT.sourceWorkflowRunId,
+    workflowRunAttempt: RECOVERY_INCIDENT.sourceWorkflowRunAttempt,
+    extensionId: RECOVERY_INCIDENT.extensionId,
+    version: RECOVERY_INCIDENT.version,
+    assetFile: RECOVERY_INCIDENT.assetFile,
+    sha256: RECOVERY_INCIDENT.sha256,
+  };
+  for (const [field, value] of Object.entries(expected)) {
+    assert(receipt[field] === value, `Marketplace attempt receipt ${field} does not match the recorded incident`);
+  }
+  assert(receipt.repository === manifest.repository, "Marketplace attempt receipt repository does not match the release manifest");
+  assert(receipt.sourceCommit === manifest.sourceCommit, "Marketplace attempt receipt sourceCommit does not match the release manifest");
+  assert(receipt.workflowRunId === manifest.workflowRunId, "Marketplace attempt receipt workflowRunId does not match the release manifest");
+  assert(receipt.extensionId === manifest.extensionId, "Marketplace attempt receipt extensionId does not match the release manifest");
+  assert(receipt.version === manifest.version, "Marketplace attempt receipt version does not match the release manifest");
+  assert(receipt.assetFile === manifest.assetFile, "Marketplace attempt receipt assetFile does not match the release manifest");
+  assert(receipt.sha256 === manifest.sha256, "Marketplace attempt receipt sha256 does not match the release manifest");
+  return receipt;
+}
+
+export async function verifyRecoveryAttemptReceipt(directory, manifest) {
+  await assertDirectoryEntries(directory, [MARKETPLACE_ATTEMPT_FILE]);
+  return validateMarketplaceAttemptReceipt(
+    await readBoundedJsonFile(path.join(directory, MARKETPLACE_ATTEMPT_FILE), "Marketplace attempt receipt"),
+    manifest,
+  );
+}
+
+export function validateRecoveryDispatch({
+  githubEventName,
+  githubRef,
+  publish,
+  recovery,
+  workflowRunId,
+  workflowRunAttempt,
+  recoveryCodeCommit,
+  confirmationReference,
+}) {
+  assert(githubEventName === "workflow_dispatch", "Recovery is allowed only from workflow_dispatch");
+  assert(githubRef === RECOVERY_INCIDENT.sourceWorkflowRef, `Recovery is allowed only from ${RECOVERY_INCIDENT.sourceWorkflowRef}`);
+  assert(parsePublishFlag(publish) === false, "Ordinary publication and incident recovery are mutually exclusive");
+  assert(parsePublishFlag(recovery) === true, "RECOVERY must be exactly true");
+  assertString(workflowRunId, RUN_ID, "recovery workflow run id");
+  validateMarketplaceRunAttempt(workflowRunAttempt);
+  assertString(recoveryCodeCommit, FULL_SHA, "recovery code commit");
+  assert(
+    typeof confirmationReference === "string"
+      && /^[A-Za-z0-9][A-Za-z0-9 ._:/#-]{5,199}$/.test(confirmationReference)
+      && !/[?&=]/.test(confirmationReference),
+    "authoritative Marketplace confirmation reference is missing or unsafe",
+  );
+  return true;
+}
+
+function validateRecoveryDecision(decision, manifest) {
+  assertExactKeys(decision, recoveryDecisionKeys, "Marketplace recovery decision");
+  const expected = {
+    schemaVersion: RELEASE_SCHEMA_VERSION,
+    kind: "marketplace-recovery-decision",
+    repository: RECOVERY_INCIDENT.repository,
+    extensionId: RECOVERY_INCIDENT.extensionId,
+    version: RECOVERY_INCIDENT.version,
+    sourceCommit: RECOVERY_INCIDENT.sourceCommit,
+    sourceWorkflowRunId: RECOVERY_INCIDENT.sourceWorkflowRunId,
+    sourceWorkflowRunAttempt: RECOVERY_INCIDENT.sourceWorkflowRunAttempt,
+    bundleArtifactId: RECOVERY_INCIDENT.bundleArtifactId,
+    attemptArtifactId: RECOVERY_INCIDENT.attemptArtifactId,
+    sha256: RECOVERY_INCIDENT.sha256,
+    recoveryWorkflowRunAttempt: "1",
+  };
+  for (const [field, value] of Object.entries(expected)) {
+    assert(decision[field] === value, `Marketplace recovery decision ${field} does not match the recorded incident`);
+  }
+  assertString(decision.recoveryWorkflowRunId, RUN_ID, "Marketplace recovery decision workflow run id");
+  assertString(decision.recoveryCodeCommit, FULL_SHA, "Marketplace recovery decision code commit");
+  validateRecoveryManifest(manifest);
+  return decision;
+}
+
+export async function prepareRecoveryDecisionReceipt(directory, manifest, dispatch) {
+  validateRecoveryManifest(manifest);
+  validateRecoveryDispatch(dispatch);
+  const resolvedDirectory = path.resolve(directory);
+  assert(resolvedDirectory !== path.parse(resolvedDirectory).root, "recovery decision directory must not be a filesystem root");
+  await mkdir(directory, { recursive: true });
+  await assertDirectoryEntries(directory, []);
+  const decision = {
+    schemaVersion: RELEASE_SCHEMA_VERSION,
+    kind: "marketplace-recovery-decision",
+    confirmationReference: dispatch.confirmationReference,
+    repository: RECOVERY_INCIDENT.repository,
+    extensionId: RECOVERY_INCIDENT.extensionId,
+    version: RECOVERY_INCIDENT.version,
+    sourceCommit: RECOVERY_INCIDENT.sourceCommit,
+    sourceWorkflowRunId: RECOVERY_INCIDENT.sourceWorkflowRunId,
+    sourceWorkflowRunAttempt: RECOVERY_INCIDENT.sourceWorkflowRunAttempt,
+    bundleArtifactId: RECOVERY_INCIDENT.bundleArtifactId,
+    attemptArtifactId: RECOVERY_INCIDENT.attemptArtifactId,
+    sha256: RECOVERY_INCIDENT.sha256,
+    recoveryWorkflowRunId: dispatch.workflowRunId,
+    recoveryWorkflowRunAttempt: dispatch.workflowRunAttempt,
+    recoveryCodeCommit: dispatch.recoveryCodeCommit,
+  };
+  await writeFile(path.join(directory, RECOVERY_DECISION_FILE), `${JSON.stringify(decision, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+  await assertDirectoryEntries(directory, [RECOVERY_DECISION_FILE]);
+  return decision;
+}
+
+export async function verifyRecoveryDecisionReceipt(directory, manifest, expected = {}) {
+  await assertDirectoryEntries(directory, [RECOVERY_DECISION_FILE]);
+  const decision = validateRecoveryDecision(
+    await readBoundedJsonFile(path.join(directory, RECOVERY_DECISION_FILE), "Marketplace recovery decision"),
+    manifest,
+  );
+  for (const [field, value] of Object.entries(expected)) {
+    if (value !== undefined && value !== "") {
+      assert(decision[field] === value, `Marketplace recovery decision ${field} does not match the current recovery run`);
+    }
+  }
+  return decision;
 }
 
 export async function prepareMarketplaceAttemptReceipt(directory, manifest, workflowRunAttempt) {
@@ -471,6 +679,83 @@ export async function githubRequest(fetchImpl, token, rawUrl, {
 function githubApiUrl(repository, suffix) {
   assertString(repository, REPOSITORY, "repository");
   return `${GITHUB_API_ORIGIN}/repos/${repository}${suffix}`;
+}
+
+function validateSourceWorkflowRun(run) {
+  assertPlainObject(run, "source workflow run");
+  assert(String(run.id) === RECOVERY_INCIDENT.sourceWorkflowRunId, "source workflow run id does not match the recorded incident");
+  assert(String(run.run_attempt) === RECOVERY_INCIDENT.sourceWorkflowRunAttempt, "source workflow run must be attempt 1");
+  assert(run.event === "workflow_dispatch", "source workflow run was not manually dispatched");
+  assert(run.head_branch === "main", "source workflow run was not dispatched from main");
+  assert(run.head_sha === RECOVERY_INCIDENT.sourceCommit, "source workflow run commit does not match the recorded incident");
+  return run;
+}
+
+function validateIncidentArtifact(artifact, expected, now) {
+  assertPlainObject(artifact, `${expected.label} artifact`);
+  assert(String(artifact.id) === expected.id, `${expected.label} artifact id does not match the recorded incident`);
+  assert(artifact.name === expected.name, `${expected.label} artifact name does not match the recorded incident`);
+  assert(artifact.expired === false, `${expected.label} artifact is expired`);
+  assertPlainObject(artifact.workflow_run, `${expected.label} artifact workflow run`);
+  assert(String(artifact.workflow_run.id) === RECOVERY_INCIDENT.sourceWorkflowRunId, `${expected.label} artifact belongs to a different workflow run`);
+  assert(artifact.workflow_run.head_branch === "main", `${expected.label} artifact was not produced from main`);
+  assert(artifact.workflow_run.head_sha === RECOVERY_INCIDENT.sourceCommit, `${expected.label} artifact source commit does not match the recorded incident`);
+  assert(typeof artifact.expires_at === "string" && Number.isFinite(Date.parse(artifact.expires_at)), `${expected.label} artifact expiry is invalid`);
+  assert(Date.parse(artifact.expires_at) > now(), `${expected.label} artifact is expired`);
+  return artifact;
+}
+
+export async function verifyRecoveryArtifactProvenance({ fetchImpl = fetch, token, now = Date.now }) {
+  const runResponse = await githubRequest(
+    fetchImpl,
+    token,
+    githubApiUrl(RECOVERY_INCIDENT.repository, `/actions/runs/${RECOVERY_INCIDENT.sourceWorkflowRunId}`),
+  );
+  validateSourceWorkflowRun(await responseJson(runResponse, "source workflow run"));
+
+  const expectedArtifacts = [
+    { id: RECOVERY_INCIDENT.bundleArtifactId, name: RECOVERY_INCIDENT.bundleArtifactName, label: "release bundle" },
+    { id: RECOVERY_INCIDENT.attemptArtifactId, name: RECOVERY_INCIDENT.attemptArtifactName, label: "Marketplace attempt receipt" },
+  ];
+  for (const expected of expectedArtifacts) {
+    const response = await githubRequest(
+      fetchImpl,
+      token,
+      githubApiUrl(RECOVERY_INCIDENT.repository, `/actions/artifacts/${expected.id}`),
+    );
+    validateIncidentArtifact(await responseJson(response, `${expected.label} artifact`), expected, now);
+  }
+  return true;
+}
+
+async function recoveryDecisionArtifacts(fetchImpl, token) {
+  const suffix = `/actions/artifacts?name=${encodeURIComponent(RECOVERY_INCIDENT.decisionArtifactName)}&per_page=100`;
+  const response = await githubRequest(fetchImpl, token, githubApiUrl(RECOVERY_INCIDENT.repository, suffix));
+  assert(!/rel="next"/.test(response.headers.get("link") ?? ""), "Recovery decision artifact query was incomplete");
+  const body = await responseJson(response, "recovery decision artifacts");
+  assertPlainObject(body, "recovery decision artifacts");
+  assert(Number.isSafeInteger(body.total_count) && body.total_count >= 0, "recovery decision artifact count is invalid");
+  assert(Array.isArray(body.artifacts) && body.artifacts.length <= 100, "recovery decision artifact list is invalid");
+  const matching = body.artifacts.filter((artifact) => artifact?.name === RECOVERY_INCIDENT.decisionArtifactName);
+  assert(matching.length === body.total_count, "Recovery decision artifact query returned inconsistent results");
+  return matching;
+}
+
+export async function requireNoPriorRecoveryDecision({ fetchImpl = fetch, token }) {
+  const decisions = await recoveryDecisionArtifacts(fetchImpl, token);
+  assert(decisions.length === 0, "A recovery decision already exists for this incident; refusing a second recovery run");
+  return true;
+}
+
+export async function requireCurrentRecoveryDecisionArtifact({ fetchImpl = fetch, token, workflowRunId }) {
+  assertString(workflowRunId, RUN_ID, "recovery workflow run id");
+  const decisions = await recoveryDecisionArtifacts(fetchImpl, token);
+  assert(decisions.length === 1, "Exactly one persisted recovery decision must exist before Marketplace recovery");
+  const [artifact] = decisions;
+  assertPlainObject(artifact.workflow_run, "recovery decision artifact workflow run");
+  assert(String(artifact.workflow_run.id) === workflowRunId, "Recovery decision artifact belongs to a different workflow run");
+  assert(artifact.expired === false, "Recovery decision artifact is expired");
+  return artifact;
 }
 
 function validateReleaseAsset(asset, { allowStarter = false } = {}) {
@@ -827,6 +1112,154 @@ export async function preflightMarketplaceRelease({ fetchImpl = fetch, token, di
   assert(existing.state === "absent", "Marketplace version already exists; refusing to publish or infer its origin");
 }
 
+export async function preflightRecoveryRelease({
+  fetchImpl = fetch,
+  token,
+  releaseDirectory,
+  attemptDirectory,
+  now = Date.now,
+  requireUnusedDecision = true,
+}) {
+  const manifest = await verifyRecoveryBundle(releaseDirectory);
+  await verifyRecoveryAttemptReceipt(attemptDirectory, manifest);
+  await verifyRecoveryArtifactProvenance({ fetchImpl, token, now });
+  if (requireUnusedDecision) {
+    await requireNoPriorRecoveryDecision({ fetchImpl, token });
+  }
+  await preflightMarketplaceRelease({ fetchImpl, token, directory: releaseDirectory, manifest });
+  return manifest;
+}
+
+function truncateDiagnostic(value) {
+  if (value.length <= MAX_DIAGNOSTIC_CHARACTERS) {
+    return value;
+  }
+  return `${value.slice(0, MAX_DIAGNOSTIC_CHARACTERS)}...[truncated]`;
+}
+
+export function sanitizePublisherDiagnostic(value, secretValues = []) {
+  let sanitized = String(value ?? "")
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .replace(/https?:\/\/[^\s<>"']+/gi, "[REDACTED_URL]")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[REDACTED_JWT]")
+    .replace(/\b(?:github_pat_|gh[pousr]_|vso_)[A-Za-z0-9_=-]{8,}\b/gi, "[REDACTED_TOKEN]")
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+    .replace(/((?:authorization|credential|access[_ -]?token|id[_ -]?token|refresh[_ -]?token|secret|password|pat)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]");
+  for (const secret of [...secretValues].filter((entry) => typeof entry === "string" && entry.length > 0).sort((a, b) => b.length - a.length)) {
+    sanitized = sanitized.split(secret).join("[REDACTED]");
+  }
+  sanitized = sanitized
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !/ACTIONS_ID_TOKEN_REQUEST_(?:URL|TOKEN)|VSCE_PAT/i.test(line))
+    .join(" | ");
+  return truncateDiagnostic(sanitized || "No non-sensitive diagnostic detail was available.");
+}
+
+function publisherFailureStage(value) {
+  const normalized = String(value ?? "").toLowerCase();
+  if (/github actions oidc|actions_id_token|oidc token request/.test(normalized)) {
+    return "GitHub OIDC token acquisition";
+  }
+  if (/marketplace oidc token exchange|trusted publish|trust policy|federated/.test(normalized)) {
+    return "Marketplace OIDC token exchange/trust policy";
+  }
+  if (/already exists|version.+(?:exists|published)|duplicate/.test(normalized)) {
+    return "Marketplace pre-upload version check";
+  }
+  return "Marketplace upload";
+}
+
+function safePublisherFailure(result, environment) {
+  const combined = [result.error?.message, result.stdout, result.stderr].filter(Boolean).join("\n");
+  const secrets = [
+    environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+    environment.ACTIONS_ID_TOKEN_REQUEST_URL,
+    environment.VSCE_PAT,
+  ];
+  const stage = publisherFailureStage(combined);
+  const detail = sanitizePublisherDiagnostic(combined, secrets);
+  return new Error(`VSCE publish failed during ${stage} (exit status ${result.status ?? "unknown"}). Sanitized detail: ${detail}`);
+}
+
+async function diagnosticJson(response, label) {
+  const bytes = await responseBytes(response, label, 64 * 1024);
+  try {
+    return JSON.parse(bytes.toString("utf8"));
+  } catch {
+    fail(`${label} returned invalid JSON`);
+  }
+}
+
+export async function diagnoseMarketplaceOidc({ fetchImpl = fetch, environment = process.env, publisher = RECOVERY_INCIDENT.publisher } = {}) {
+  assert(!environment.VSCE_PAT, "VSCE_PAT must not be present; Marketplace publication requires GitHub Actions OIDC");
+  const requestUrlValue = environment.ACTIONS_ID_TOKEN_REQUEST_URL;
+  const requestToken = environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+  assert(typeof requestUrlValue === "string" && requestUrlValue.length > 0, "GitHub Actions OIDC request URL is required");
+  assert(typeof requestToken === "string" && requestToken.length > 0, "GitHub Actions OIDC request token is required");
+  assert(publisher === RECOVERY_INCIDENT.publisher, "OIDC diagnostic publisher does not match the recovery incident");
+  let oidcToken;
+  let marketplaceCredential;
+  try {
+    const requestUrl = new URL(requestUrlValue);
+    assert(
+      requestUrl.protocol === "https:" && requestUrl.hostname.endsWith(".actions.githubusercontent.com"),
+      "GitHub Actions OIDC request URL has an unexpected origin",
+    );
+    requestUrl.searchParams.set("audience", MARKETPLACE_ORIGIN.replace("https://", ""));
+    let oidcResponse;
+    try {
+      oidcResponse = await fetchWithTimeout(fetchImpl, requestUrl, {
+        method: "GET",
+        headers: { Accept: "application/json", Authorization: `Bearer ${requestToken}` },
+        redirect: "error",
+      });
+      if (oidcResponse.status < 200 || oidcResponse.status >= 300) {
+        const status = oidcResponse.status;
+        discardResponse(oidcResponse);
+        fail(`GitHub Actions OIDC token acquisition failed with HTTP ${status}`);
+      }
+      const oidcBody = await diagnosticJson(oidcResponse, "GitHub Actions OIDC response");
+      assertPlainObject(oidcBody, "GitHub Actions OIDC response");
+      assert(typeof oidcBody.value === "string" && oidcBody.value.length > 0, "GitHub Actions OIDC response did not contain a token");
+      oidcToken = oidcBody.value;
+    } catch (error) {
+      throw new Error(`GitHub OIDC token acquisition failed. Sanitized detail: ${sanitizePublisherDiagnostic(error instanceof Error ? error.message : error, [requestToken, requestUrlValue])}`);
+    }
+
+    try {
+      const exchangeResponse = await fetchWithTimeout(fetchImpl, `${MARKETPLACE_ORIGIN}/_apis/gallery/token`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${oidcToken}`,
+          "Content-Type": "application/json",
+          "User-Agent": "safe-code-release-workflow",
+        },
+        body: JSON.stringify({ publisherName: publisher }),
+        redirect: "error",
+      });
+      if (exchangeResponse.status < 200 || exchangeResponse.status >= 300) {
+        const status = exchangeResponse.status;
+        discardResponse(exchangeResponse);
+        fail(`Marketplace OIDC token exchange/trust policy check failed with HTTP ${status}`);
+      }
+      const exchangeBody = await diagnosticJson(exchangeResponse, "Marketplace OIDC exchange response");
+      assertPlainObject(exchangeBody, "Marketplace OIDC exchange response");
+      assert(typeof exchangeBody.credential === "string" && exchangeBody.credential.length > 0, "Marketplace OIDC exchange response did not contain a credential");
+      marketplaceCredential = exchangeBody.credential;
+    } catch (error) {
+      throw new Error(`Marketplace OIDC token exchange/trust policy check failed. Sanitized detail: ${sanitizePublisherDiagnostic(error instanceof Error ? error.message : error, [requestToken, requestUrlValue, oidcToken])}`);
+    }
+    return { state: "trusted-publisher-ready" };
+  } finally {
+    oidcToken = undefined;
+    marketplaceCredential = undefined;
+  }
+}
+
 function requireEnvironment(name) {
   const value = process.env[name];
   assert(typeof value === "string" && value.length > 0, `${name} is required`);
@@ -851,6 +1284,111 @@ async function loadBundleFromEnvironment({ verifyTools = false } = {}) {
     assert(vscePackage.version === manifest.vsceVersion, "actual VSCE version does not match the release manifest");
   }
   return { directory, manifest };
+}
+
+function recoveryDispatchFromEnvironment() {
+  return {
+    githubEventName: requireEnvironment("GITHUB_EVENT_NAME"),
+    githubRef: requireEnvironment("GITHUB_REF"),
+    publish: process.env.PUBLISH ?? "false",
+    recovery: requireEnvironment("RECOVERY"),
+    workflowRunId: requireEnvironment("WORKFLOW_RUN_ID"),
+    workflowRunAttempt: requireEnvironment("WORKFLOW_RUN_ATTEMPT"),
+    recoveryCodeCommit: requireEnvironment("RECOVERY_CODE_COMMIT"),
+    confirmationReference: requireEnvironment("RECOVERY_CONFIRMATION_REFERENCE"),
+  };
+}
+
+async function verifyRecoveryTools(manifest) {
+  assert(process.version.slice(1) === manifest.nodeVersion, "actual Node.js version does not match the recovery release manifest");
+  const npmVersion = commandOutput("npm", ["--version"]);
+  const vscePackage = await readBoundedJsonFile(path.resolve("node_modules/@vscode/vsce/package.json"), "installed VSCE package");
+  assert(npmVersion === manifest.npmVersion, "actual npm version does not match the recovery release manifest");
+  assert(vscePackage.version === manifest.vsceVersion, "actual VSCE version does not match the recovery release manifest");
+}
+
+async function loadRecoveryFromEnvironment({ verifyTools = false } = {}) {
+  const releaseDirectory = requireEnvironment("RELEASE_DIRECTORY");
+  const attemptDirectory = requireEnvironment("MARKETPLACE_ATTEMPT_DIRECTORY");
+  const manifest = await verifyRecoveryBundle(releaseDirectory);
+  await verifyRecoveryAttemptReceipt(attemptDirectory, manifest);
+  if (verifyTools) {
+    await verifyRecoveryTools(manifest);
+  }
+  return { releaseDirectory, attemptDirectory, manifest };
+}
+
+async function verifyRecoveryExecutionGate({ fetchImpl = fetch, token, verifyTools = false } = {}) {
+  const context = await loadRecoveryFromEnvironment({ verifyTools });
+  const dispatch = recoveryDispatchFromEnvironment();
+  validateRecoveryDispatch(dispatch);
+  const head = await readDetachedGitHead(process.cwd());
+  assert(head === dispatch.recoveryCodeCommit, "checked-out HEAD does not match the recovery code commit");
+  const decision = await verifyRecoveryDecisionReceipt(requireEnvironment("RECOVERY_DECISION_DIRECTORY"), context.manifest, {
+    confirmationReference: dispatch.confirmationReference,
+    recoveryWorkflowRunId: dispatch.workflowRunId,
+    recoveryWorkflowRunAttempt: dispatch.workflowRunAttempt,
+    recoveryCodeCommit: dispatch.recoveryCodeCommit,
+  });
+  await verifyRecoveryArtifactProvenance({ fetchImpl, token });
+  await requireCurrentRecoveryDecisionArtifact({ fetchImpl, token, workflowRunId: dispatch.workflowRunId });
+  await preflightMarketplaceRelease({
+    fetchImpl,
+    token,
+    directory: context.releaseDirectory,
+    manifest: context.manifest,
+  });
+  return { ...context, dispatch, decision };
+}
+
+async function writeOidcDiagnosticReceipt(filePath, dispatch) {
+  const resolved = path.resolve(filePath);
+  assert(path.dirname(resolved) !== path.parse(resolved).root, "OIDC diagnostic receipt must not be written to a filesystem root");
+  await writeFile(resolved, `${JSON.stringify({
+    schemaVersion: RELEASE_SCHEMA_VERSION,
+    kind: "marketplace-recovery-oidc-diagnostic",
+    recoveryWorkflowRunId: dispatch.workflowRunId,
+    recoveryWorkflowRunAttempt: dispatch.workflowRunAttempt,
+    recoveryCodeCommit: dispatch.recoveryCodeCommit,
+    publisher: RECOVERY_INCIDENT.publisher,
+  }, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+}
+
+async function verifyOidcDiagnosticReceipt(filePath, dispatch) {
+  await assertRegularFile(filePath, "OIDC diagnostic receipt");
+  const receipt = await readBoundedJsonFile(filePath, "OIDC diagnostic receipt");
+  assertExactKeys(receipt, [
+    "schemaVersion",
+    "kind",
+    "recoveryWorkflowRunId",
+    "recoveryWorkflowRunAttempt",
+    "recoveryCodeCommit",
+    "publisher",
+  ], "OIDC diagnostic receipt");
+  assert(receipt.schemaVersion === RELEASE_SCHEMA_VERSION, "OIDC diagnostic receipt schemaVersion is unsupported");
+  assert(receipt.kind === "marketplace-recovery-oidc-diagnostic", "OIDC diagnostic receipt kind is invalid");
+  assert(receipt.recoveryWorkflowRunId === dispatch.workflowRunId, "OIDC diagnostic receipt belongs to a different workflow run");
+  assert(receipt.recoveryWorkflowRunAttempt === dispatch.workflowRunAttempt, "OIDC diagnostic receipt belongs to a different workflow attempt");
+  assert(receipt.recoveryCodeCommit === dispatch.recoveryCodeCommit, "OIDC diagnostic receipt code commit does not match");
+  assert(receipt.publisher === RECOVERY_INCIDENT.publisher, "OIDC diagnostic receipt publisher does not match");
+  return receipt;
+}
+
+export async function publishRecoveryMarketplaceRelease({
+  fetchImpl = fetch,
+  token,
+  directory,
+  manifest,
+  workflowRunAttempt,
+  runPublisher,
+  waitOptions = {},
+}) {
+  validateMarketplaceRunAttempt(workflowRunAttempt);
+  validateRecoveryManifest(manifest);
+  await preflightMarketplaceRelease({ fetchImpl, token, directory, manifest });
+  await runPublisher(path.join(directory, manifest.assetFile));
+  const visibility = await waitForMarketplace({ fetchImpl, manifest, allowPending: true, ...waitOptions });
+  return { state: visibility.state === "present" ? "published-and-visible" : visibility.state };
 }
 
 export function runVscePublisher(assetPath, { environment = process.env, spawn = spawnSync } = {}) {
@@ -885,14 +1423,91 @@ export function runVscePublisher(assetPath, { environment = process.env, spawn =
     env: publisherEnvironment,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 128 * 1024,
   });
   if (result.status !== 0) {
-    throw new Error(`VSCE publish failed with exit status ${result.status ?? "unknown"}; inspect the masked Actions step log`);
+    throw safePublisherFailure(result, environment);
   }
 }
 
 async function main() {
   const command = process.argv[2];
+  if (command === "prepare-recovery-decision") {
+    const { releaseDirectory, attemptDirectory, manifest } = await loadRecoveryFromEnvironment({ verifyTools: true });
+    const dispatch = recoveryDispatchFromEnvironment();
+    validateRecoveryDispatch(dispatch);
+    assert(await readDetachedGitHead(process.cwd()) === dispatch.recoveryCodeCommit, "checked-out HEAD does not match the recovery code commit");
+    await preflightRecoveryRelease({
+      fetchImpl: fetch,
+      token: requireEnvironment("GITHUB_TOKEN"),
+      releaseDirectory,
+      attemptDirectory,
+    });
+    await prepareRecoveryDecisionReceipt(requireEnvironment("RECOVERY_DECISION_DIRECTORY"), manifest, dispatch);
+    process.stdout.write(`Prepared the immutable recovery decision for incident run ${RECOVERY_INCIDENT.sourceWorkflowRunId}.\n`);
+    return;
+  }
+
+  if (command === "diagnose-recovery-oidc") {
+    const { dispatch } = await verifyRecoveryExecutionGate({
+      fetchImpl: fetch,
+      token: requireEnvironment("GITHUB_TOKEN"),
+      verifyTools: true,
+    });
+    await diagnoseMarketplaceOidc();
+    await writeOidcDiagnosticReceipt(requireEnvironment("OIDC_DIAGNOSTIC_FILE"), dispatch);
+    process.stdout.write(`OIDC trusted-publisher diagnostic succeeded for ${RECOVERY_INCIDENT.publisher}; the short-lived credential was discarded.\n`);
+    return;
+  }
+
+  if (command === "publish-recovery-marketplace") {
+    const { releaseDirectory, manifest, dispatch } = await verifyRecoveryExecutionGate({
+      fetchImpl: fetch,
+      token: requireEnvironment("GITHUB_TOKEN"),
+      verifyTools: true,
+    });
+    await verifyOidcDiagnosticReceipt(requireEnvironment("OIDC_DIAGNOSTIC_FILE"), dispatch);
+    const result = await publishRecoveryMarketplaceRelease({
+      fetchImpl: fetch,
+      token: requireEnvironment("GITHUB_TOKEN"),
+      directory: releaseDirectory,
+      manifest,
+      workflowRunAttempt: dispatch.workflowRunAttempt,
+      runPublisher: runVscePublisher,
+    });
+    process.stdout.write(`Marketplace recovery publication state: ${result.state}.\n`);
+    return;
+  }
+
+  if (command === "publish-recovery-github") {
+    const { manifest, releaseDirectory } = await loadRecoveryFromEnvironment();
+    const githubEventName = requireEnvironment("GITHUB_EVENT_NAME");
+    const githubRef = requireEnvironment("GITHUB_REF");
+    const workflowRunId = requireEnvironment("WORKFLOW_RUN_ID");
+    const recoveryCodeCommit = requireEnvironment("RECOVERY_CODE_COMMIT");
+    assert(githubEventName === "workflow_dispatch", "Recovery is allowed only from workflow_dispatch");
+    assert(githubRef === RECOVERY_INCIDENT.sourceWorkflowRef, `Recovery is allowed only from ${RECOVERY_INCIDENT.sourceWorkflowRef}`);
+    assert(parsePublishFlag(process.env.PUBLISH ?? "false") === false, "Ordinary publication and incident recovery are mutually exclusive");
+    assert(parsePublishFlag(requireEnvironment("RECOVERY")) === true, "RECOVERY must be exactly true");
+    assertString(workflowRunId, RUN_ID, "recovery workflow run id");
+    assertString(recoveryCodeCommit, FULL_SHA, "recovery code commit");
+    assert(await readDetachedGitHead(process.cwd()) === recoveryCodeCommit, "checked-out HEAD does not match the recovery code commit");
+    await verifyRecoveryAttemptReceipt(requireEnvironment("MARKETPLACE_ATTEMPT_DIRECTORY"), manifest);
+    await verifyRecoveryDecisionReceipt(requireEnvironment("RECOVERY_DECISION_DIRECTORY"), manifest, {
+      confirmationReference: requireEnvironment("RECOVERY_CONFIRMATION_REFERENCE"),
+      recoveryWorkflowRunId: workflowRunId,
+      recoveryWorkflowRunAttempt: "1",
+      recoveryCodeCommit,
+    });
+    const token = requireEnvironment("GITHUB_TOKEN");
+    await verifyRecoveryArtifactProvenance({ fetchImpl: fetch, token });
+    await requireCurrentRecoveryDecisionArtifact({ fetchImpl: fetch, token, workflowRunId });
+    await requireMarketplaceVersionVisible(fetch, manifest);
+    const release = await publishGithubRelease({ fetchImpl: fetch, token, directory: releaseDirectory, manifest });
+    process.stdout.write(`Published recovery GitHub Release ${release.tag_name}.\n`);
+    return;
+  }
+
   if (command === "prepare") {
     const workspace = process.cwd();
     const packageJson = await readBoundedJsonFile(path.join(workspace, "package.json"), "package.json");
@@ -979,7 +1594,7 @@ async function main() {
     return;
   }
 
-  fail("Usage: release-helper.mjs <prepare|verify-artifact|github-preflight|prepare-marketplace-attempt|publish-marketplace|verify-marketplace|publish-github>");
+  fail("Usage: release-helper.mjs <prepare|verify-artifact|github-preflight|prepare-marketplace-attempt|publish-marketplace|verify-marketplace|publish-github|prepare-recovery-decision|diagnose-recovery-oidc|publish-recovery-marketplace|publish-recovery-github>");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

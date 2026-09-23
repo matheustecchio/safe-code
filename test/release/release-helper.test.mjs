@@ -8,21 +8,35 @@ import {
   MARKETPLACE_ATTEMPT_FILE,
   PINNED_NODE_VERSION,
   PINNED_VSCE_VERSION,
+  RECOVERY_DECISION_FILE,
+  RECOVERY_INCIDENT,
+  diagnoseMarketplaceOidc,
   githubRequest,
   prepareMarketplaceAttemptReceipt,
+  prepareRecoveryDecisionReceipt,
   prepareReleaseBundle,
   preflightGithubRelease,
+  preflightRecoveryRelease,
   probeMarketplaceArtifact,
   publishGithubRelease,
   publishMarketplaceRelease,
+  publishRecoveryMarketplaceRelease,
   readDetachedGitHead,
+  requireCurrentRecoveryDecisionArtifact,
+  requireNoPriorRecoveryDecision,
   requireMarketplaceVersionVisible,
   releaseBody,
   runVscePublisher,
+  sanitizePublisherDiagnostic,
   responseBytes,
   validateMarketplaceRunAttempt,
   validatePublicationGuard,
+  validateRecoveryDispatch,
   verifyReleaseBundle,
+  verifyRecoveryAttemptReceipt,
+  verifyRecoveryArtifactProvenance,
+  verifyRecoveryBundle,
+  verifyRecoveryDecisionReceipt,
   waitForMarketplace,
 } from "../../scripts/release-helper.mjs";
 
@@ -31,11 +45,51 @@ const REPOSITORY = "matheustecchio/safe-code";
 const RUN_ID = "12345";
 const temporaryDirectories = [];
 
+function recoveryManifest(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    extensionId: RECOVERY_INCIDENT.extensionId,
+    version: RECOVERY_INCIDENT.version,
+    tag: `v${RECOVERY_INCIDENT.version}`,
+    repository: RECOVERY_INCIDENT.repository,
+    sourceCommit: RECOVERY_INCIDENT.sourceCommit,
+    workflowRunId: RECOVERY_INCIDENT.sourceWorkflowRunId,
+    nodeVersion: PINNED_NODE_VERSION,
+    npmVersion: "10.9.4",
+    vsceVersion: PINNED_VSCE_VERSION,
+    assetFile: RECOVERY_INCIDENT.assetFile,
+    assetSize: 123,
+    sha256: RECOVERY_INCIDENT.sha256,
+    checksumFile: `${RECOVERY_INCIDENT.assetFile}.sha256`,
+    manifestFile: "release-manifest.json",
+    ...overrides,
+  };
+}
+
+function recoveryDispatch(overrides = {}) {
+  return {
+    githubEventName: "workflow_dispatch",
+    githubRef: "refs/heads/main",
+    publish: "false",
+    recovery: "true",
+    workflowRunId: "40000000000",
+    workflowRunAttempt: "1",
+    recoveryCodeCommit: "b".repeat(40),
+    confirmationReference: "Microsoft support case 123456",
+    ...overrides,
+  };
+}
+
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-async function makeBundle() {
+async function makeBundle({
+  sourceCommit = SOURCE_COMMIT,
+  workflowRunId = RUN_ID,
+  version = "0.5.0",
+  expectedDigest,
+} = {}) {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "safe-code-release-"));
   temporaryDirectories.push(workspace);
   const directory = path.join(workspace, "bundle");
@@ -45,7 +99,7 @@ async function makeBundle() {
   const packageJson = {
     name: "safe-code",
     publisher: "matheus-tecchio",
-    version: "0.5.0",
+    version,
     repository: { type: "git", url: "https://github.com/matheustecchio/safe-code.git" },
     devDependencies: { "@vscode/vsce": PINNED_VSCE_VERSION },
   };
@@ -54,8 +108,8 @@ async function makeBundle() {
     releaseDirectory: directory,
     sourceVsix,
     repository: REPOSITORY,
-    sourceCommit: SOURCE_COMMIT,
-    workflowRunId: RUN_ID,
+    sourceCommit,
+    workflowRunId,
     githubEventName: "pull_request",
     githubRef: "refs/pull/27/merge",
     expectedVersion: "",
@@ -63,9 +117,13 @@ async function makeBundle() {
     nodeVersion: PINNED_NODE_VERSION,
     npmVersion: "10.9.4",
     vsceVersion: PINNED_VSCE_VERSION,
-    headCommit: SOURCE_COMMIT,
+    headCommit: sourceCommit,
     packageJson,
   });
+  if (expectedDigest !== undefined && manifest.sha256 !== expectedDigest) {
+    const assetBytes = await readFile(path.join(directory, manifest.assetFile));
+    assert.fail(`test fixture digest ${manifest.sha256} for ${assetBytes.length} bytes does not match ${expectedDigest}`);
+  }
   return { workspace, directory, manifest };
 }
 
@@ -134,6 +192,142 @@ test("creates one exact immutable Marketplace publication-attempt receipt", asyn
     receipt,
   );
   await assert.rejects(prepareMarketplaceAttemptReceipt(receiptDirectory, manifest, "1"), /must contain exactly/);
+});
+
+test("pins recovery to the one recorded 1.0.0 incident and a first-attempt main dispatch", () => {
+  assert.deepEqual(RECOVERY_INCIDENT, {
+    repository: "matheustecchio/safe-code",
+    extensionId: "matheus-tecchio.safe-code",
+    publisher: "matheus-tecchio",
+    version: "1.0.0",
+    sourceCommit: "6d963b58d8fce12511538fa86548b2e77b3bce21",
+    sourceWorkflowRunId: "35912409247",
+    sourceWorkflowRunAttempt: "1",
+    sourceWorkflowRef: "refs/heads/main",
+    bundleArtifactId: "10773757838",
+    bundleArtifactName: "safe-code-release-35912409247-1",
+    attemptArtifactId: "10772978663",
+    attemptArtifactName: "safe-code-marketplace-attempt-35912409247-1",
+    assetFile: "safe-code-1.0.0.vsix",
+    sha256: "914c44d330bea2ed54fc54b90ec88b94f4092535d7b0b6864b9a7cfbefa5dede",
+    decisionArtifactName: "safe-code-recovery-decision-35912409247",
+  });
+  assert.equal(validateRecoveryDispatch(recoveryDispatch()), true);
+  assert.throws(() => validateRecoveryDispatch(recoveryDispatch({ workflowRunAttempt: "2" })), /first workflow run attempt/);
+  assert.throws(() => validateRecoveryDispatch(recoveryDispatch({ githubRef: "refs/heads/fix/recovery" })), /refs\/heads\/main/);
+  assert.throws(() => validateRecoveryDispatch(recoveryDispatch({ publish: "true" })), /mutually exclusive/);
+  assert.throws(() => validateRecoveryDispatch(recoveryDispatch({ confirmationReference: "" })), /confirmation reference/);
+});
+
+test("recovery bundle refuses repackaged bytes even when run, commit, and version match", async () => {
+  const { directory } = await makeBundle({
+    sourceCommit: RECOVERY_INCIDENT.sourceCommit,
+    workflowRunId: RECOVERY_INCIDENT.sourceWorkflowRunId,
+    version: RECOVERY_INCIDENT.version,
+  });
+  await assert.rejects(verifyRecoveryBundle(directory), /sha256 does not match the recorded incident/);
+});
+
+test("binds the recovery decision and original attempt receipt across every incident identity", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "safe-code-recovery-receipts-"));
+  temporaryDirectories.push(root);
+  const decisionDirectory = path.join(root, "decision");
+  const attemptDirectory = path.join(root, "attempt");
+  await mkdir(attemptDirectory);
+  const manifest = recoveryManifest();
+  const dispatch = recoveryDispatch();
+  const decision = await prepareRecoveryDecisionReceipt(decisionDirectory, manifest, dispatch);
+  assert.equal(decision.sha256, RECOVERY_INCIDENT.sha256);
+  assert.deepEqual(await readdir(decisionDirectory), [RECOVERY_DECISION_FILE]);
+  assert.equal((await verifyRecoveryDecisionReceipt(decisionDirectory, manifest, {
+    recoveryWorkflowRunId: dispatch.workflowRunId,
+    recoveryCodeCommit: dispatch.recoveryCodeCommit,
+  })).confirmationReference, dispatch.confirmationReference);
+
+  const attempt = {
+    schemaVersion: 1,
+    kind: "marketplace-publication-attempt",
+    repository: RECOVERY_INCIDENT.repository,
+    sourceCommit: RECOVERY_INCIDENT.sourceCommit,
+    workflowRunId: RECOVERY_INCIDENT.sourceWorkflowRunId,
+    workflowRunAttempt: "1",
+    extensionId: RECOVERY_INCIDENT.extensionId,
+    version: RECOVERY_INCIDENT.version,
+    assetFile: RECOVERY_INCIDENT.assetFile,
+    sha256: RECOVERY_INCIDENT.sha256,
+  };
+  await writeFile(path.join(attemptDirectory, MARKETPLACE_ATTEMPT_FILE), `${JSON.stringify(attempt)}\n`);
+  await verifyRecoveryAttemptReceipt(attemptDirectory, manifest);
+  await writeFile(path.join(attemptDirectory, MARKETPLACE_ATTEMPT_FILE), `${JSON.stringify({ ...attempt, sha256: "0".repeat(64) })}\n`);
+  await assert.rejects(verifyRecoveryAttemptReceipt(attemptDirectory, manifest), /sha256 does not match/);
+  await assert.rejects(
+    verifyRecoveryDecisionReceipt(decisionDirectory, recoveryManifest({ version: "1.0.1", tag: "v1.0.1" })),
+    /canonical|recorded incident/,
+  );
+});
+
+test("rejects missing, expired, or cross-run recovery artifacts", async () => {
+  const expiresAt = "2026-10-23T00:00:00Z";
+  const sourceRun = {
+    id: Number(RECOVERY_INCIDENT.sourceWorkflowRunId),
+    run_attempt: 1,
+    event: "workflow_dispatch",
+    head_branch: "main",
+    head_sha: RECOVERY_INCIDENT.sourceCommit,
+  };
+  const artifact = (id, name, overrides = {}) => ({
+    id: Number(id),
+    name,
+    expired: false,
+    expires_at: expiresAt,
+    workflow_run: {
+      id: Number(RECOVERY_INCIDENT.sourceWorkflowRunId),
+      head_branch: "main",
+      head_sha: RECOVERY_INCIDENT.sourceCommit,
+    },
+    ...overrides,
+  });
+  function provenanceFetch(overrides = {}) {
+    return async (rawUrl) => {
+      const pathname = new URL(rawUrl).pathname;
+      if (pathname.endsWith(`/actions/runs/${RECOVERY_INCIDENT.sourceWorkflowRunId}`)) return jsonResponse(overrides.run ?? sourceRun);
+      if (pathname.endsWith(`/actions/artifacts/${RECOVERY_INCIDENT.bundleArtifactId}`)) {
+        if (overrides.missingBundle) return new Response(null, { status: 404 });
+        return jsonResponse(overrides.bundle ?? artifact(RECOVERY_INCIDENT.bundleArtifactId, RECOVERY_INCIDENT.bundleArtifactName));
+      }
+      return jsonResponse(overrides.attempt ?? artifact(RECOVERY_INCIDENT.attemptArtifactId, RECOVERY_INCIDENT.attemptArtifactName));
+    };
+  }
+  const now = () => Date.parse("2026-09-23T00:00:00Z");
+  assert.equal(await verifyRecoveryArtifactProvenance({ fetchImpl: provenanceFetch(), token: "token", now }), true);
+  await assert.rejects(verifyRecoveryArtifactProvenance({ fetchImpl: provenanceFetch({ missingBundle: true }), token: "token", now }), /HTTP 404/);
+  await assert.rejects(verifyRecoveryArtifactProvenance({
+    fetchImpl: provenanceFetch({ bundle: artifact(RECOVERY_INCIDENT.bundleArtifactId, RECOVERY_INCIDENT.bundleArtifactName, { expired: true }) }),
+    token: "token",
+    now,
+  }), /expired/);
+  await assert.rejects(verifyRecoveryArtifactProvenance({
+    fetchImpl: provenanceFetch({ attempt: artifact(RECOVERY_INCIDENT.attemptArtifactId, RECOVERY_INCIDENT.attemptArtifactName, {
+      workflow_run: { id: 999, head_branch: "main", head_sha: RECOVERY_INCIDENT.sourceCommit },
+    }) }),
+    token: "token",
+    now,
+  }), /different workflow run/);
+});
+
+test("uses the immutable recovery decision artifact as a cross-run single-use lock", async () => {
+  const response = (artifacts) => async () => jsonResponse({ total_count: artifacts.length, artifacts });
+  assert.equal(await requireNoPriorRecoveryDecision({ fetchImpl: response([]), token: "token" }), true);
+  const current = {
+    id: 10,
+    name: RECOVERY_INCIDENT.decisionArtifactName,
+    expired: false,
+    workflow_run: { id: 40000000000 },
+  };
+  await assert.rejects(requireNoPriorRecoveryDecision({ fetchImpl: response([current]), token: "token" }), /second recovery run/);
+  assert.equal((await requireCurrentRecoveryDecisionArtifact({ fetchImpl: response([current]), token: "token", workflowRunId: "40000000000" })).id, 10);
+  await assert.rejects(requireCurrentRecoveryDecisionArtifact({ fetchImpl: response([current]), token: "token", workflowRunId: "40000000001" }), /different workflow run/);
+  await assert.rejects(requireCurrentRecoveryDecisionArtifact({ fetchImpl: response([current, { ...current, id: 11 }]), token: "token", workflowRunId: "40000000000" }), /Exactly one/);
 });
 
 test("attempt-two consumers accept an attempt-one bundle because recovery is anchored to run id", async () => {
@@ -207,6 +401,64 @@ test("OIDC publisher rejects PATs, passes fixed flags, and strips unrelated cred
   assert.equal(invocation.options.env.GITHUB_TOKEN, undefined);
   assert.equal(invocation.options.env.GH_TOKEN, undefined);
   assert.equal(invocation.options.env.UNRELATED_SECRET, undefined);
+});
+
+test("OIDC diagnostic exchanges then discards credentials without an upload request", async () => {
+  const oidcToken = `eyJ${"a".repeat(30)}.${"b".repeat(30)}.${"c".repeat(30)}`;
+  const credential = "marketplace-short-lived-credential";
+  const requests = [];
+  const result = await diagnoseMarketplaceOidc({
+    environment: {
+      ACTIONS_ID_TOKEN_REQUEST_URL: "https://vstoken.actions.githubusercontent.com/token?api-version=2.0",
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: "github-oidc-request-secret",
+    },
+    fetchImpl: async (rawUrl, options) => {
+      const url = new URL(rawUrl);
+      requests.push({ url, options });
+      if (url.hostname.endsWith(".actions.githubusercontent.com")) {
+        return jsonResponse({ value: oidcToken });
+      }
+      assert.equal(url.toString(), "https://marketplace.visualstudio.com/_apis/gallery/token");
+      assert.equal(options.method, "POST");
+      assert.equal(options.headers.Authorization, `Bearer ${oidcToken}`);
+      assert.deepEqual(JSON.parse(options.body), { publisherName: RECOVERY_INCIDENT.publisher });
+      return jsonResponse({ credential });
+    },
+  });
+  assert.deepEqual(result, { state: "trusted-publisher-ready" });
+  assert.equal(requests.length, 2);
+  assert.equal(requests.some(({ url }) => /publish|vspackage/i.test(url.pathname)), false);
+});
+
+test("publisher diagnostics are stage-aware, redacted, control-free, and bounded", () => {
+  const requestUrl = "https://vstoken.actions.githubusercontent.com/token?secret=query-value";
+  const requestToken = "github-oidc-request-secret";
+  const jwt = `eyJ${"a".repeat(40)}.${"b".repeat(40)}.${"c".repeat(40)}`;
+  let failure;
+  try {
+    runVscePublisher("artifact.vsix", {
+      environment: {
+        ACTIONS_ID_TOKEN_REQUEST_URL: requestUrl,
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: requestToken,
+      },
+      spawn: () => ({
+        status: 1,
+        stdout: `\u001b[31mMarketplace OIDC token exchange trust policy rejected ${requestUrl}\u001b[0m`,
+        stderr: `Authorization: Bearer ${jwt}\ncredential=${requestToken}\n${"x".repeat(10_000)}`,
+      }),
+    });
+  } catch (error) {
+    failure = error;
+  }
+  assert(failure instanceof Error);
+  assert.match(failure.message, /Marketplace OIDC token exchange\/trust policy/);
+  assert.match(failure.message, /Sanitized detail/);
+  assert.doesNotMatch(failure.message, /query-value|github-oidc-request-secret|eyJ|\u001b|https:\/\//);
+  assert(failure.message.length < 2_300);
+
+  const sanitized = sanitizePublisherDiagnostic(`token=${requestToken} ${"z".repeat(10_000)}`, [requestToken]);
+  assert.doesNotMatch(sanitized, /github-oidc-request-secret/);
+  assert.match(sanitized, /truncated/);
 });
 
 test("GitHub request treats only an explicitly allowed 404 as absence", async () => {
@@ -558,4 +810,71 @@ test("successful publish may finish pending on repeated 404, while pre-existing 
     workflowRunAttempt: "1",
     runPublisher: async () => { throw new Error("ambiguous publisher failure"); },
   }), /ambiguous publisher failure/);
+});
+
+test("recovery publisher failure is single-shot and cannot mutate GitHub", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "safe-code-recovery-publish-"));
+  temporaryDirectories.push(directory);
+  const manifest = recoveryManifest();
+  await writeFile(path.join(directory, manifest.assetFile), "original-vsix-fixture");
+  await writeFile(path.join(directory, manifest.checksumFile), "checksum-fixture");
+  await writeFile(path.join(directory, manifest.manifestFile), "manifest-fixture");
+  const requests = [];
+  const fetchImpl = async (rawUrl, options = {}) => {
+    const url = new URL(rawUrl);
+    requests.push({ url, method: options.method ?? "GET" });
+    if (url.hostname === "api.github.com" && url.pathname.includes("/git/ref/")) {
+      return new Response(null, { status: 404 });
+    }
+    if (url.hostname === "api.github.com") {
+      return jsonResponse([]);
+    }
+    return new Response(null, { status: 404 });
+  };
+  let publisherCalls = 0;
+  await assert.rejects(publishRecoveryMarketplaceRelease({
+    fetchImpl,
+    token: "token",
+    directory,
+    manifest,
+    workflowRunAttempt: "1",
+    runPublisher: async () => {
+      publisherCalls += 1;
+      throw new Error("ambiguous recovery publisher failure");
+    },
+  }), /ambiguous recovery publisher failure/);
+  assert.equal(publisherCalls, 1);
+  assert.equal(requests.every(({ method }) => method === "GET"), true);
+  assert.equal(requests.some(({ url }) => url.hostname === "uploads.github.com"), false);
+
+  const callsBeforeExistingState = publisherCalls;
+  await assert.rejects(publishRecoveryMarketplaceRelease({
+    fetchImpl: async (rawUrl) => {
+      const url = new URL(rawUrl);
+      if (url.hostname === "api.github.com" && url.pathname.includes("/git/ref/")) return new Response(null, { status: 404 });
+      if (url.hostname === "api.github.com") return jsonResponse([]);
+      return new Response(Buffer.from("PK\u0003\u0004already-published"), { status: 200 });
+    },
+    token: "token",
+    directory,
+    manifest,
+    workflowRunAttempt: "1",
+    runPublisher: async () => { publisherCalls += 1; },
+  }), /already exists/);
+  assert.equal(publisherCalls, callsBeforeExistingState);
+
+  await assert.rejects(publishRecoveryMarketplaceRelease({
+    fetchImpl: async (rawUrl) => {
+      const url = new URL(rawUrl);
+      if (url.pathname.includes("/git/ref/")) return new Response(null, { status: 404 });
+      if (url.pathname.endsWith("/releases")) return jsonResponse([releaseFixture(manifest)]);
+      throw new Error(`unexpected request ${url}`);
+    },
+    token: "token",
+    directory,
+    manifest,
+    workflowRunAttempt: "1",
+    runPublisher: async () => { publisherCalls += 1; },
+  }), /No GitHub tag or release/);
+  assert.equal(publisherCalls, callsBeforeExistingState);
 });
