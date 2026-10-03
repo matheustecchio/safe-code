@@ -91,7 +91,7 @@ When a user asks for a new release of the VS Code extension:
 - The ordinary workflow builds once, verifies a strict three-file bundle, and publishes a GitHub Release with the exact VSIX, checksum, and manifest. It does not publish to or require visibility in the Marketplace.
 - After the GitHub Release is public, the owner downloads its VSIX and manually uploads that same file through the `matheus-tecchio` Marketplace publisher portal. Do not rebuild or substitute a local VSIX for that version. Confirm the exact version in the publisher view and public listing.
 - Same-run partial GitHub drafts are resumable; foreign or mismatched drafts, tags, releases, and assets fail closed. If Marketplace upload fails, retain the GitHub Release and retry only the manual upload after checking the publisher view.
-- Keep the `1.0.0` OIDC recovery isolated on the original first-attempt artifact. It still requires the protected `marketplace` environment and the documented authoritative non-acceptance evidence; the new ordinary flow does not change its gates.
+- Version `1.0.0` is already published in the Marketplace and as GitHub Release `v1.0.0`. Do not dispatch the retained OIDC recovery: its required absence gates cannot pass. Keep its code and gates intact; use the GitHub-first flow above for future versions.
 
 See `docs/dev/development.md` for bundle contents, permissions, validation order, and recovery details.
 
