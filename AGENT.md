@@ -34,7 +34,7 @@ This repository contains Safe Code, a VS Code extension that detects suspicious 
 - Package extension with the pinned local tool: `./node_modules/.bin/vsce package --no-dependencies`
 - Test release automation: `npm run test:release`
 - Verify workflow action pins: `npm run verify:workflow-pins`
-- Publish extension: use the `Publish release` GitHub Actions workflow; do not publish locally.
+- Publish GitHub Release: use the `Publish release` GitHub Actions workflow; upload its VSIX to the Marketplace manually afterward.
 
 Run `npm test` before committing TypeScript, configuration, or test changes. This command includes the production compile, unit tests, and VS Code integration tests. For documentation-only changes, running the test suite is optional.
 
@@ -86,14 +86,12 @@ When a user asks for a new release of the VS Code extension:
 - Commit the release changes, push the branch, and create or update a PR against `main`.
 - Do not merge the PR.
 - Pull requests automatically exercise the credential-free `build` dry run. A manual `publish: false` run does the same.
-- Wait for the repository owner to review and merge the release PR. Publish only after an explicit request by manually running `Publish release` from `main` with `publish: true` and `expected_version` exactly equal to `package.json`.
+- Wait for the repository owner to review and merge the release PR. Publish only after an explicit request by manually running `Publish release` from `main` with `publish: true` and `expected_version` exactly equal to `package.json`. The ordinary path must reject the recorded `1.0.0` incident version.
 - Keep Node.js 22.23.2, `@vscode/vsce` 4.0.0, Ubuntu 24.04, and all reviewed action SHA pins unchanged unless the update itself is reviewed and tested.
-- Marketplace publication must use the `marketplace` GitHub environment and OIDC trusted publishing. Never add or use `VSCE_PAT`, `--skip-duplicate`, `gh`, or `jq` in the release path.
-- Restrict the `marketplace` environment to deployments from `main`. Require workflow run attempt `1` before invoking VSCE, persist the immutable Marketplace attempt receipt, and keep recovery on the original first-attempt artifact.
-- The workflow builds once, verifies a strict three-file bundle, uploads the prebuilt VSIX to the Marketplace, then attaches the exact same original VSIX plus its checksum and manifest to the GitHub Release.
-- Marketplace public downloads are signed/repackaged and are checked for exact version visibility, not byte equality. The GitHub asset retains the original recorded bytes.
-- If Marketplace propagation is pending, rerun only the failed `publish-github` job from the same workflow run after the version becomes visible. Same-run partial GitHub drafts are resumable; foreign or mismatched drafts, tags, releases, and assets fail closed.
-- A nonzero or ambiguous VSCE result requires explicit manual investigation. The Marketplace job must never run on a workflow re-run attempt; do not rerun the publisher or infer success from a pre-existing version.
+- The ordinary workflow builds once, verifies a strict three-file bundle, and publishes a GitHub Release with the exact VSIX, checksum, and manifest. It does not publish to or require visibility in the Marketplace.
+- After the GitHub Release is public, the owner downloads its VSIX and manually uploads that same file through the `matheus-tecchio` Marketplace publisher portal. Do not rebuild or substitute a local VSIX for that version. Confirm the exact version in the publisher view and public listing.
+- Same-run partial GitHub drafts are resumable; foreign or mismatched drafts, tags, releases, and assets fail closed. If Marketplace upload fails, retain the GitHub Release and retry only the manual upload after checking the publisher view.
+- Keep the `1.0.0` OIDC recovery isolated on the original first-attempt artifact. It still requires the protected `marketplace` environment and the documented authoritative non-acceptance evidence; the new ordinary flow does not change its gates.
 
 See `docs/dev/development.md` for bundle contents, permissions, validation order, and recovery details.
 

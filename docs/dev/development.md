@@ -394,14 +394,7 @@ To change ignore behavior, edit `src/ignoreStore.ts`.
 
 ## Release Workflow
 
-`.github/workflows/publish-github-release.yml` is the only supported publication path. It uses Ubuntu 24.04, Node.js 22.23.2, `@vscode/vsce` 4.0.0, and reviewed commit-SHA pins for every external action. The repository's `marketplace` GitHub environment must be configured for the `matheus-tecchio` Marketplace publisher's trusted-publishing/OIDC policy. Do not add a `VSCE_PAT` secret.
-
-### One-time trusted-publishing setup
-
-1. In the GitHub repository settings, create an environment named `marketplace`. Under its deployment branches and tags, select **Selected branches and tags** and allow only `main`. This main-only rule is required because the Marketplace trust is bound to the environment; an optional required-reviewer rule can add a human approval gate.
-2. In Visual Studio Marketplace publisher management for `matheus-tecchio`, add a GitHub Actions trusted publisher.
-3. Set the owner to `matheustecchio`, repository to `safe-code`, workflow filename to `publish-github-release.yml`, and environment to `marketplace`.
-4. Keep the workflow's Marketplace job scoped to `id-token: write` and repository `contents: read`. Before enabling the trusted publisher, verify that a non-`main` deployment cannot enter the `marketplace` environment. Do not create a `VSCE_PAT` repository or environment secret.
+`.github/workflows/publish-github-release.yml` builds the VSIX and publishes the GitHub Release for new versions. The extension owner then uploads that exact Release VSIX manually through the [Visual Studio Marketplace publisher portal](https://marketplace.visualstudio.com/manage/publishers/). The workflow uses Ubuntu 24.04, Node.js 22.23.2, `@vscode/vsce` 4.0.0, and reviewed commit-SHA pins for every external action. Ordinary releases do not use Marketplace credentials or GitHub OIDC. The existing OIDC jobs remain only for the separate, recorded `1.0.0` incident recovery.
 
 ### Prepare and dry-run
 
@@ -420,27 +413,20 @@ The manifest records the canonical version, extension ID, repository, workflow r
 
 ### Publish
 
-From the GitHub Actions page, run `Publish release` against `main`, set `publish` to `true`, and enter the exact `package.json` value in `expected_version`. A publication request fails when the event is not `workflow_dispatch`, the ref is not `main`, the version input is missing or differs, the checkout is not the event commit, a tool version differs, or the target version/tag/release already exists.
-
-The three jobs have deliberately separate authority:
+From the GitHub Actions page, run `Publish release` against `main`, set `publish` to `true`, and enter the exact `package.json` value in `expected_version`. The ordinary path refuses the recorded incident version `1.0.0`. A publication request fails when the event is not `workflow_dispatch`, the ref is not `main`, the version input is missing or differs, the checkout is not the event commit, a tool version differs, or a conflicting target tag/release exists.
 
 1. `build` runs the full tests and packages the VSIX once. It has read-only repository permission and no publication credential.
-2. `publish-marketplace` downloads and locally re-verifies the first workflow attempt's exact three-file bundle. Before publishing, it rejects any existing Git tag, any release visible to its read-scoped token, and an existing Marketplace version; refuses every workflow re-run attempt; and persists a run-and-attempt-keyed immutable audit receipt. The pinned local VSCE binary uploads the prebuilt VSIX with GitHub Actions OIDC; it never rebuilds and never uses `--skip-duplicate`.
-3. `publish-github` always downloads that original first-attempt bundle and first checks that the exact Marketplace version is visible. It then creates a draft targeted at the source SHA, uploads the VSIX, checksum, and manifest, downloads all three again to verify their bytes, and only then publishes the release as latest and confirms the tag target.
+2. `publish-github` downloads and verifies that exact three-file bundle. It creates a draft targeted at the source SHA, uploads the VSIX, checksum, and manifest, downloads all three again to verify their bytes, then publishes the Release as latest and confirms the tag target. It does not access the Marketplace.
+3. Download `safe-code-<version>.vsix` from the published GitHub Release, sign in to the `matheus-tecchio` [publisher portal](https://marketplace.visualstudio.com/manage/publishers/), and upload that file to the existing Safe Code extension. Do not rebuild or substitute a local VSIX. Confirm that the exact version appears in the authenticated publisher view and public listing. The Marketplace signs and repackages extensions, so its public download bytes need not match the original GitHub asset; the GitHub checksum and manifest identify the uploaded source file.
 
-The Marketplace signs and repackages extensions, so the public Marketplace VSIX is not expected to have the build artifact's SHA-256. The workflow proves that VSCE received the locally verified prebuilt file and checks the exact version endpoint for propagation. The original bytes remain independently verifiable through the GitHub Release assets and manifest.
-
-GitHub exposes draft releases only to callers with push access. The Marketplace job deliberately has `contents: read`, so its preflight cannot prove that no hidden draft uses the version tag. The later write-scoped GitHub job repeats the preflight, sees drafts, and refuses any draft whose source commit, run ID, provenance, or assets do not match. This preserves least privilege but can require operator recovery after Marketplace publication if an unrelated hidden draft already occupied the tag.
+The GitHub Release is public before the Marketplace upload. If the upload fails, keep the Release and retry the manual upload of its original VSIX after checking whether the version already appears in the publisher view. Do not create a second Release or rebuild the package for the same version.
 
 ### Recovery
 
-- If VSCE exits successfully but the version remains invisible for the full bounded 15-minute polling period, the Marketplace job records `accepted-pending-propagation` and succeeds. The GitHub job performs one visibility probe and fails before creating a draft if propagation is still pending. Once the version appears, rerun only the failed `publish-github` job from that same workflow run; it reuses the original artifact and does not invoke Marketplace publication.
-- The Marketplace helper requires workflow run attempt `1` both before creating the receipt and immediately before invoking VSCE. GitHub increments the run-attempt value for every whole-workflow or individual-job re-run, so no Marketplace job re-run can reach the publisher. The immutable receipt is uploaded immediately before VSCE as audit evidence; it is not treated as a cross-attempt lock.
-- A failed GitHub upload can leave a draft. Re-running only the failed GitHub job from the same workflow run verifies the draft's run ID, commit, version, provenance, and every completed asset, uploads only missing assets, then publishes. It never overwrites or deletes a completed asset. After exact same-run provenance validation, it may remove only an incomplete GitHub `starter` placeholder for an expected asset name before uploading the retained local file. If publication succeeded but the response was lost, the retry verifies the already-published release and completes without another write.
+- A failed GitHub upload can leave a draft. Re-running only the failed `publish-github` job from the same workflow run verifies the draft's run ID, commit, version, provenance, and every completed asset, uploads only missing assets, then publishes. It never overwrites or deletes a completed asset. After exact same-run provenance validation, it may remove only an incomplete GitHub `starter` placeholder for an expected asset name before uploading the retained local file. If publication succeeded but the response was lost, the retry verifies the already-published release and completes without another write.
 - A draft from another run, a mismatched asset, an unexpected tag, or an unrelated published release fails closed. Do not edit the draft to make it pass.
-- If the write-scoped GitHub job discovers a previously hidden foreign draft after Marketplace publication, inspect its ownership and provenance. Resolve that repository-side conflict explicitly, then rerun only `publish-github` from the original workflow run; never rerun the Marketplace job or rebuild the VSIX.
-- A nonzero or ambiguous VSCE exit is a hard failure because Marketplace packages are immutable and their public bytes are re-signed. The first-attempt guard mechanically blocks a same-run publisher retry. Do not start another ordinary publication run, use `--skip-duplicate`, infer ownership from version absence, or create a GitHub Release. Stop unless a separately reviewed, incident-specific recovery path exists.
-- If a production run fails before VSCE is invoked, confirm that no Marketplace publication was attempted and start a fresh manual workflow run instead of re-running its Marketplace job. A pull-request or `publish: false` dry run has no publisher job and remains freely rerunnable.
+- If the build fails before the GitHub job starts, fix the cause and start a fresh manual run from `main`. A pull-request or `publish: false` dry run has no write-scoped release job and remains freely rerunnable.
+- The `1.0.0` attempt is a separate incident. Its original Marketplace publisher result was ambiguous, and the incident recovery below remains the only path for that version. Never upload the newly generated local `1.0.0` VSIX as an incident retry.
 - Do not rerun the complete workflow after a partial publication. A new run ID intentionally cannot claim or overwrite the previous run's draft or artifact.
 
 #### Incident recovery for the ambiguous 1.0.0 attempt
