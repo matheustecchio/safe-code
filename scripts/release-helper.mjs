@@ -148,6 +148,7 @@ export function validatePublicationGuard({ publish, githubEventName, githubRef, 
 
   assert(githubEventName === "workflow_dispatch", "Publication is allowed only from workflow_dispatch");
   assert(githubRef === "refs/heads/main", "Publication is allowed only from refs/heads/main");
+  assert(packageVersion !== RECOVERY_INCIDENT.version, "Version 1.0.0 is reserved for the recorded incident recovery");
   assert(typeof expectedVersion === "string" && expectedVersion.length > 0, "expected_version is required for publication");
   assert(VERSION.test(expectedVersion), "expected_version is not a canonical version");
   assert(expectedVersion === packageVersion, "expected_version does not match package.json");
@@ -799,7 +800,10 @@ function markerMetadata(manifest) {
 
 export function releaseBody(manifest) {
   const marker = Buffer.from(JSON.stringify(markerMetadata(manifest)), "utf8").toString("base64url");
-  return `Built once from commit \`${manifest.sourceCommit}\` with Node.js ${manifest.nodeVersion}, npm ${manifest.npmVersion}, and @vscode/vsce ${manifest.vsceVersion}.\n\nVSIX SHA-256: \`${manifest.sha256}\`\n\n<!-- safe-code-release:${marker} -->`;
+  const marketplaceNote = manifest.version === RECOVERY_INCIDENT.version
+    ? ""
+    : "\n\nMarketplace upload is a separate manual step. Download this release's VSIX and upload that exact file to the Visual Studio Marketplace publisher portal.";
+  return `Built once from commit \`${manifest.sourceCommit}\` with Node.js ${manifest.nodeVersion}, npm ${manifest.npmVersion}, and @vscode/vsce ${manifest.vsceVersion}.\n\nVSIX SHA-256: \`${manifest.sha256}\`${marketplaceNote}\n\n<!-- safe-code-release:${marker} -->`;
 }
 
 function parseReleaseMarker(body) {
@@ -1547,46 +1551,6 @@ async function main() {
     return;
   }
 
-  if (command === "prepare-marketplace-attempt") {
-    const { directory, manifest } = await loadBundleFromEnvironment({ verifyTools: true });
-    const workflowRunAttempt = requireEnvironment("WORKFLOW_RUN_ATTEMPT");
-    validateMarketplaceRunAttempt(workflowRunAttempt);
-    await preflightMarketplaceRelease({
-      fetchImpl: fetch,
-      token: requireEnvironment("GITHUB_TOKEN"),
-      directory,
-      manifest,
-    });
-    const receipt = await prepareMarketplaceAttemptReceipt(
-      requireEnvironment("MARKETPLACE_ATTEMPT_DIRECTORY"),
-      manifest,
-      workflowRunAttempt,
-    );
-    process.stdout.write(`Prepared immutable Marketplace publication receipt for ${receipt.extensionId} ${receipt.version}.\n`);
-    return;
-  }
-
-  if (command === "publish-marketplace") {
-    const { directory, manifest } = await loadBundleFromEnvironment({ verifyTools: true });
-    const result = await publishMarketplaceRelease({
-      fetchImpl: fetch,
-      token: requireEnvironment("GITHUB_TOKEN"),
-      directory,
-      manifest,
-      workflowRunAttempt: requireEnvironment("WORKFLOW_RUN_ATTEMPT"),
-      runPublisher: runVscePublisher,
-    });
-    process.stdout.write(`Marketplace publication state: ${result.state}.\n`);
-    return;
-  }
-
-  if (command === "verify-marketplace") {
-    const { manifest } = await loadBundleFromEnvironment();
-    await requireMarketplaceVersionVisible(fetch, manifest);
-    process.stdout.write(`Marketplace version ${manifest.version} is visible.\n`);
-    return;
-  }
-
   if (command === "publish-github") {
     const { directory, manifest } = await loadBundleFromEnvironment();
     const release = await publishGithubRelease({ fetchImpl: fetch, token: requireEnvironment("GITHUB_TOKEN"), directory, manifest });
@@ -1594,7 +1558,7 @@ async function main() {
     return;
   }
 
-  fail("Usage: release-helper.mjs <prepare|verify-artifact|github-preflight|prepare-marketplace-attempt|publish-marketplace|verify-marketplace|publish-github|prepare-recovery-decision|diagnose-recovery-oidc|publish-recovery-marketplace|publish-recovery-github>");
+  fail("Usage: release-helper.mjs <prepare|verify-artifact|github-preflight|publish-github|prepare-recovery-decision|diagnose-recovery-oidc|publish-recovery-marketplace|publish-recovery-github>");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
