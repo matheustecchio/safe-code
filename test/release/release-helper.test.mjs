@@ -138,6 +138,14 @@ test("publication guard supports dry runs and only permits an exact main workflo
   assert.throws(() => validatePublicationGuard({ ...base, publish: true, githubEventName: "workflow_dispatch", githubRef: "refs/heads/main" }), /required/);
   assert.throws(() => validatePublicationGuard({ ...base, publish: true, githubEventName: "workflow_dispatch", githubRef: "refs/heads/main", expectedVersion: "not\na-version" }), /canonical/);
   assert.throws(() => validatePublicationGuard({ ...base, publish: true, githubEventName: "workflow_dispatch", githubRef: "refs/heads/main", expectedVersion: "0.5.1" }), /does not match package\.json/);
+  assert.throws(() => validatePublicationGuard({ ...base, publish: true, githubEventName: "workflow_dispatch", githubRef: "refs/heads/main", packageVersion: "1.0.0", expectedVersion: "1.0.0" }), /recorded incident recovery/);
+});
+
+test("ordinary release notes direct the manual Marketplace upload while incident notes do not", async () => {
+  const { manifest } = await makeBundle();
+  assert.match(releaseBody(manifest), /Marketplace upload is a separate manual step/);
+  assert.match(releaseBody(manifest), /upload that exact file/);
+  assert.doesNotMatch(releaseBody(recoveryManifest()), /Marketplace upload is a separate manual step/);
 });
 
 test("Marketplace publication is limited to the first workflow run attempt", () => {
