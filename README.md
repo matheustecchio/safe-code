@@ -15,7 +15,7 @@ Safe Code is a lightweight VS Code extension that detects possible hardcoded sec
 
 ## Supported files
 
-Safe Code scans common code and config files: `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.go`, `.java`, `.cs`, `.php`, `.rb`, `.env`, `.json`, `.yaml`, `.yml`, `.toml`, `.ini`, and `.md`. Files named `.env`, `.env.local`, and other `.env.*` variants remain eligible, but directories named exactly `.env` are always excluded at any depth.
+Safe Code scans common code and config files: `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.go`, `.java`, `.cs`, `.php`, `.rb`, `.env`, `.json`, `.yaml`, `.yml`, `.toml`, `.ini`, and `.md`. Files named `.env`, `.env.local`, and other `.env.*` variants remain eligible, but directories named exactly `.env`, `.venv`, `venv`, or `.environment` are always excluded at any depth.
 
 ## Current detections
 
@@ -104,6 +104,9 @@ For safety, `.safe-code.json` must be either missing or a regular file. Safe Cod
     "**/node_modules/**",
     "**/.git/**",
     "**/.env/**",
+    "**/.venv/**",
+    "**/venv/**",
+    "**/.environment/**",
     "**/dist/**",
     "**/build/**",
     "**/coverage/**",
@@ -114,7 +117,7 @@ For safety, `.safe-code.json` must be either missing or a regular file. Safe Cod
 }
 ```
 
-The built-in dependency, build, cache, and exact `.env/` directory exclusions are always enforced. Add workspace-relative glob patterns to `safeCode.ignoredPaths` for project-specific generated files or directories.
+The built-in dependency, build, cache, and exact `.env/`, `.venv/`, `venv/`, and `.environment/` directory exclusions are always enforced. Add workspace-relative glob patterns to `safeCode.ignoredPaths` for project-specific generated files or directories. Empty or replacement arrays cannot disable built-in exclusions. Similar names such as `.venv-config`, `my.venv`, `.environment-config`, `env`, and `environment` remain eligible. General Git ignore filtering is not implemented: even Git-ignored `.env` and `.env.*` files remain eligible for secret diagnostics.
 
 `safeCode.maxFileSizeBytes` limits each file to 1 MiB by default. Closed files are checked before they are opened, while open or unsaved documents are measured from their current UTF-8 text. Files exactly at the limit are accepted; larger files are skipped and any old Safe Code diagnostic for them is removed.
 
