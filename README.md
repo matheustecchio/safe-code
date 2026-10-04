@@ -19,10 +19,13 @@ Safe Code scans common code and config files: `.ts`, `.tsx`, `.js`, `.jsx`, `.py
 
 ## Current detections
 
-- Generic secret assignments such as `apiKey = "..."`, `password: "..."`, `client_secret = "..."`, and `DATABASE_URL=...`.
+- Quoted secret assignments such as `apiKey = "..."`, `password: "..."`, and `client_secret = "..."`.
+- Unquoted secret assignments such as `API_KEY=value`, including `export` assignments, only in files named `.env` or `.env.*` (case-insensitive).
 - Private key headers such as `-----BEGIN PRIVATE KEY-----`.
 - Database URLs with embedded credentials.
 - GitHub tokens, AWS access keys, and Stripe live secret keys.
+
+Source identifiers, member accesses, and environment lookups are not treated as unquoted dotenv credentials. Interpolated backtick templates do not trigger the generic assignment rule; plain quoted and non-interpolated backtick literals remain eligible. Specialized credential signatures remain detectable inside expressions. This is conservative regex matching, not language parsing or data-flow analysis; it does not add unquoted YAML/INI or shell-expansion support.
 
 Safe Code ignores common placeholder values such as `example`, `sample`, `test`, `fake`, `dummy`, `changeme`, `your-api-key`, `your-token`, `xxx`, `123456`, and `password`.
 

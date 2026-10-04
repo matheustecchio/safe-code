@@ -41,7 +41,7 @@ export type SecretRule = {
 | `stripe-live-key` | Stripe live secret keys starting with `sk_live_`. |
 | `database-url` | Database URLs containing a username and password. |
 | `generic-secret-assignment` | Quoted assignments to suspicious variable names such as `apiKey`, `password`, `token`, or `client_secret`. |
-| `env-secret-assignment` | Unquoted `.env`-style assignments to suspicious names such as `DATABASE_URL=value`. |
+| `env-secret-assignment` | Unquoted assignments to suspicious names only in `.env` and `.env.*` files (case-insensitive), including `export`. |
 
 ## Generic Assignment Detection
 
@@ -61,7 +61,7 @@ It looks for variable or property names containing terms such as:
 - `database_url`
 - `connection_string`
 
-It then requires a `:` or `=` assignment and a quoted value with at least 8 characters.
+It then requires a `:` or `=` assignment and a quoted value with at least 8 characters. Backtick values containing unescaped `${` interpolation are excluded from this generic rule; non-interpolated backticks and escaped interpolation markers remain eligible. Specialized credential signatures embedded in expressions are still detected. This conservative regex heuristic does not parse languages or perform data-flow analysis.
 
 Example matches:
 
@@ -73,7 +73,7 @@ const password = "admin12345";
 
 ## Environment Assignment Detection
 
-The environment assignment rule catches unquoted `.env`-style values.
+The environment assignment rule catches unquoted values only when the explicit `scanText` filename has basename `.env` or begins with `.env.`, case-insensitively. It does not run in source files or other formats, so identifiers, member accesses, function calls, environment lookups, and boolean/null-like expressions are not treated as dotenv secrets. Unknown filename contexts do not enable the rule. Quoted dotenv literals still use the generic assignment rule. This does not add unquoted YAML/INI detection or shell-expansion handling.
 
 Example matches:
 

@@ -194,6 +194,10 @@ The activation function is `activate(context)` in `src/extension.ts`.
 
 If more than 256 distinct resources arrive, later resources are dropped from that batch and one overflow flag is retained. After the drain, the flag requests at most one silent full workspace rescan; another overflow episode during that recovery is coalesced into one follow-up. Active URI guards prevent a deleted or superseded in-flight read from publishing stale diagnostics, and guard state is released after each job instead of retaining a lifetime path history.
 
+## Assignment Context
+
+`scanText` requires `CoreScannerOptions.fileName`; `scanDocument` supplies the document filename and the benchmark supplies each fixture filename. Only basenames equal to `.env` or beginning with `.env.` (case-insensitive, with normalized separators) enable `env-secret-assignment`. Source expressions and other formats never fall back to dotenv matching. Quoted literal assignments and specialized signatures retain their existing contexts. Generic backtick matches with unescaped `${` interpolation are skipped, while escaped interpolation markers and non-interpolated backticks remain literal candidates. Specialized signatures still run inside expressions. This regex heuristic is not a parser or data-flow analysis and adds no unquoted YAML/INI or shell-expansion support. Rule IDs, ignore identities, diagnostic redaction, and migration restrictions are unchanged.
+
 ## Document Filtering
 
 The scanner only scans documents that pass `shouldScanDocument(document, options)` in `src/scanner.ts`.

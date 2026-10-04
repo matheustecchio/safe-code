@@ -47,7 +47,7 @@ function exerciseWorkspaceScanCore(events) {
 
     const byteLength = Buffer.byteLength(event.text, "utf8");
     assert.equal(budget.accept(byteLength), "accepted");
-    findings += scanText(event.text, { minimumSecretLength: 8 }).length;
+    findings += scanText(event.text, { minimumSecretLength: 8, fileName: event.fileName }).length;
   }
 
   return {

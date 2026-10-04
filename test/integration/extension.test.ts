@@ -486,6 +486,53 @@ suite("Safe Code extension", () => {
     }
   });
 
+  test("scans source expressions without dotenv false positives and removes stale literal warnings", async () => {
+    const pythonUri = await createWorkspaceFile("first-party/expressions.py", [
+      "privateKeyOpenSSL = clientCertificate.privateKey.original",
+      "configuration = CertificateOptions(",
+      "    privateKey=privateKeyOpenSSL,",
+      ")",
+      'apiKey = os.getenv("API_KEY")'
+    ].join("\n"));
+    const sourceUri = await createWorkspaceFile("first-party/expressions.ts", [
+      "const token = ordinaryIdentifier;",
+      "const privateKey = process.env.PRIVATE_KEY;",
+      'const apiKey = `${process.env.API_KEY}`;'
+    ].join("\n"));
+    const dotenvUri = await createWorkspaceFileWithExactBaseName(".EnV.local", "export API_KEY=synthetic-dotenv-credential");
+    const literalUri = await createWorkspaceFile("first-party/literal.py", 'configuration = CertificateOptions(privateKey="literal-secret-value")');
+
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+    for (const uri of [pythonUri, sourceUri]) {
+      assert.deepStrictEqual(getSafeCodeDiagnostics(uri), [], uri.fsPath);
+      await vscode.workspace.openTextDocument(uri);
+    }
+    await vscode.workspace.openTextDocument(dotenvUri);
+    const literalDocument = await vscode.workspace.openTextDocument(literalUri);
+    await vscode.commands.executeCommand("safeCode.scanOpenFiles");
+    for (const uri of [pythonUri, sourceUri]) {
+      assert.deepStrictEqual(getSafeCodeDiagnostics(uri), [], uri.fsPath);
+    }
+    const dotenvDiagnostics = getSafeCodeDiagnostics(dotenvUri);
+    assert.strictEqual(dotenvDiagnostics.length, 1);
+    assert.strictEqual(dotenvDiagnostics[0].code, "env-secret-assignment");
+    const dotenvDocument = await vscode.workspace.openTextDocument(dotenvUri);
+    assert.strictEqual(dotenvDocument.getText(dotenvDiagnostics[0].range), "synthetic-dotenv-credential");
+    const literalDiagnostics = getSafeCodeDiagnostics(literalUri);
+    assert.strictEqual(literalDiagnostics.length, 1);
+    assert.strictEqual(literalDiagnostics[0].code, "generic-secret-assignment");
+    assert.strictEqual(literalDocument.getText(literalDiagnostics[0].range), "literal-secret-value");
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(literalUri, new vscode.Range(literalDocument.positionAt(0), literalDocument.positionAt(literalDocument.getText().length)), "configuration = CertificateOptions(privateKey=privateKeyOpenSSL)");
+    assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
+    await eventually(() => getSafeCodeDiagnostics(literalUri), (items) => items.length === 0);
+    assert.strictEqual(await literalDocument.save(), true);
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+    assert.deepStrictEqual(getSafeCodeDiagnostics(literalUri), []);
+    assert.strictEqual(getSafeCodeDiagnostics(dotenvUri).length, 1);
+  });
+
   test("workspace scan respects local warning ignores", async () => {
     const uri = await createWorkspaceFile("ignored-warning.ts", 'const apiKey = "ignored-workspace-secret";');
     const document = await vscode.workspace.openTextDocument(uri);
