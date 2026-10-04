@@ -3,8 +3,6 @@ import { BigIntStats, constants } from "fs";
 import { FileHandle, lstat, mkdir, open, rename, unlink } from "fs/promises";
 import * as path from "path";
 import {
-  IgnoredWarning,
-  matchesIgnoredWarning,
   parseProjectIgnoreConfig,
   ProjectIgnoreConfig,
   serializeProjectIgnoreConfig
@@ -86,19 +84,24 @@ export function normalizeProjectIgnoreFileError(
   return createFileError(code);
 }
 
-export async function addProjectIgnoredWarning(
+export async function addProjectIgnoredRule(
   configPath: string,
-  warning: IgnoredWarning
+  ruleId: string
 ): Promise<ProjectIgnoreFileUpdate> {
+  if (typeof ruleId !== "string" || ruleId.trim().length === 0) {
+    throw createFileError("invalid-configuration");
+  }
   const snapshot = await readProjectIgnoreFileSnapshot(configPath);
   const config = parseSnapshot(snapshot);
-  if (config.ignoredWarnings.some((candidate) => matchesIgnoredWarning(candidate, warning))) {
+  const ignoredRules = config.version === 2 ? config.ignoredRules : [];
+  if (ignoredRules.includes(ruleId)) {
     return { changed: false, config };
   }
 
   const updatedConfig: ProjectIgnoreConfig = {
-    version: 1,
-    ignoredWarnings: [...config.ignoredWarnings, warning].sort(compareWarnings)
+    version: 2,
+    ignoredWarnings: config.ignoredWarnings,
+    ignoredRules: [...ignoredRules, ruleId]
   };
   const nextBytes = Buffer.from(serializeProjectIgnoreConfig(updatedConfig), "utf8");
   await writeProjectIgnoreFile(configPath, snapshot, nextBytes);
@@ -479,14 +482,6 @@ function sameStableFile(left: FileIdentity, right: FileIdentity): boolean {
     left.nlink === right.nlink &&
     left.size === right.size &&
     left.uid === right.uid
-  );
-}
-
-function compareWarnings(left: IgnoredWarning, right: IgnoredWarning): number {
-  return (
-    left.filePath.localeCompare(right.filePath) ||
-    left.ruleId.localeCompare(right.ruleId) ||
-    left.lineHash.localeCompare(right.lineHash)
   );
 }
 

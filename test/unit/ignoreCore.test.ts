@@ -43,6 +43,23 @@ suite("ignore core", () => {
     assert.deepStrictEqual(parseProjectIgnoreConfig(serializeProjectIgnoreConfig(config)), config);
   });
 
+  test("round trips version 2 while deduplicating only exact rule IDs", () => {
+    const warning = createIgnoredWarning("src/a.ts", "synthetic", "legacy");
+    const config = parseProjectIgnoreConfig(JSON.stringify({ version: 2, ignoredWarnings: [warning],
+      ignoredRules: ["rule", "rule", "Rule", "rule-other"] }));
+    assert.deepStrictEqual(config, { version: 2, ignoredWarnings: [warning],
+      ignoredRules: ["rule", "Rule", "rule-other"] });
+    assert.deepStrictEqual(parseProjectIgnoreConfig(serializeProjectIgnoreConfig(config)), config);
+    for (const ignoredRules of [null, "rule", [""], [" "], ["valid", 1]]) {
+      assert.throws(() => parseProjectIgnoreConfig(JSON.stringify({ version: 2,
+        ignoredWarnings: [warning], ignoredRules })), ProjectIgnoreConfigError);
+    }
+    assert.throws(() => parseProjectIgnoreConfig(JSON.stringify({ version: 1,
+      ignoredWarnings: [], ignoredRules: [] })), ProjectIgnoreConfigError);
+    assert.throws(() => parseProjectIgnoreConfig(JSON.stringify({ version: 3,
+      ignoredWarnings: [], ignoredRules: [] })), ProjectIgnoreConfigError);
+  });
+
   test("rejects malformed project configuration without accepting partial entries", () => {
     const invalidConfigs = [
       "not json",

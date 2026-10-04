@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import { createIgnoredWarning, serializeProjectIgnoreConfig } from "../../src/ignoreCore";
 import {
-  addProjectIgnoredWarning,
+  addProjectIgnoredRule,
   getProjectIgnoreFileErrorMessage,
   normalizeProjectIgnoreFileError,
   ProjectIgnoreFileError,
@@ -35,10 +35,10 @@ suite("project ignore file", () => {
     assert.deepStrictEqual(await readProjectIgnoreConfigFile(configPath), { version: 1, ignoredWarnings: [] });
     const warning = createIgnoredWarning("src/missing.ts", "const token = secret;", "generic-secret-assignment");
 
-    const update = await addProjectIgnoredWarning(configPath, warning);
+    const update = await addProjectIgnoredRule(configPath, warning.ruleId);
 
     assert.strictEqual(update.changed, true);
-    assert.deepStrictEqual(update.config, { version: 1, ignoredWarnings: [warning] });
+    assert.deepStrictEqual(update.config, { version: 2, ignoredWarnings: [], ignoredRules: [warning.ruleId] });
     assert.deepStrictEqual(await readProjectIgnoreConfigFile(configPath), update.config);
     if (process.platform !== "win32") {
       assert.strictEqual((await stat(configPath)).mode & 0o777, 0o600);
@@ -51,7 +51,7 @@ suite("project ignore file", () => {
     const settingsPath = path.join(path.dirname(configPath), "settings.json");
     await writeFile(settingsPath, '{"editor.tabSize":2}');
     const warning = createIgnoredWarning("src/a.ts", "secret", "rule");
-    await addProjectIgnoredWarning(configPath, warning);
+    await addProjectIgnoredRule(configPath, warning.ruleId);
     assert.deepStrictEqual(await readProjectIgnoreConfigFile(otherConfig), { version: 1, ignoredWarnings: [] });
     assert.strictEqual(await readFile(settingsPath, "utf8"), '{"editor.tabSize":2}');
   });
@@ -66,10 +66,10 @@ suite("project ignore file", () => {
     );
     const originalStat = await stat(configPath);
 
-    const update = await addProjectIgnoredWarning(configPath, secondWarning);
+    const update = await addProjectIgnoredRule(configPath, secondWarning.ruleId);
 
     assert.strictEqual(update.changed, true);
-    assert.deepStrictEqual(update.config.ignoredWarnings, [secondWarning, firstWarning]);
+    assert.deepStrictEqual(update.config, { version: 2, ignoredWarnings: [firstWarning], ignoredRules: [secondWarning.ruleId] });
     assert.deepStrictEqual(await readProjectIgnoreConfigFile(configPath), update.config);
     const updatedStat = await stat(configPath);
     if (process.platform !== "win32") {
@@ -79,14 +79,32 @@ suite("project ignore file", () => {
     assert.deepStrictEqual(await readdir(path.dirname(configPath)), [".safe-code.json"]);
   });
 
+  test("retains rules and legacy occurrences and does not rewrite duplicate actions", async () => {
+    const warning = createIgnoredWarning("src/legacy.ts", "secret", "legacy-rule");
+    const original = serializeProjectIgnoreConfig({ version: 1, ignoredWarnings: [warning] });
+    await writeFile(configPath, original);
+    await readProjectIgnoreConfigFile(configPath);
+    assert.strictEqual(await readFile(configPath, "utf8"), original);
+    await addProjectIgnoredRule(configPath, "first-rule");
+    await addProjectIgnoredRule(configPath, "second-rule");
+    const bytes = await readFile(configPath);
+    assert.strictEqual((await addProjectIgnoredRule(configPath, "first-rule")).changed, false);
+    assert.deepStrictEqual(await readFile(configPath), bytes);
+    assert.deepStrictEqual(await readProjectIgnoreConfigFile(configPath), {
+      version: 2, ignoredWarnings: [warning], ignoredRules: ["first-rule", "second-rule"]
+    });
+    await assertProjectIgnoreFileError(addProjectIgnoredRule(configPath, "  "), "invalid-configuration", []);
+    assert.deepStrictEqual(await readFile(configPath), bytes);
+  });
+
   test("rejects invalid configuration without exposing or changing its bytes", async () => {
     const invalidBytes = Buffer.from('{"privateValue":"do-not-expose"}\n', "utf8");
     await writeFile(configPath, invalidBytes);
 
     await assertProjectIgnoreFileError(
-      addProjectIgnoredWarning(
+      addProjectIgnoredRule(
         configPath,
-        createIgnoredWarning("src/invalid.ts", "const token = invalid;", "generic-secret-assignment")
+        createIgnoredWarning("src/invalid.ts", "const token = invalid;", "generic-secret-assignment").ruleId
       ),
       "invalid-configuration",
       ["do-not-expose", temporaryRoot]
@@ -111,9 +129,9 @@ suite("project ignore file", () => {
 
     await assertProjectIgnoreFileError(readProjectIgnoreConfigFile(configPath), "unsafe-target", [outsidePath]);
     await assertProjectIgnoreFileError(
-      addProjectIgnoredWarning(
+      addProjectIgnoredRule(
         configPath,
-        createIgnoredWarning("src/link.ts", "const token = linked;", "generic-secret-assignment")
+        createIgnoredWarning("src/link.ts", "const token = linked;", "generic-secret-assignment").ruleId
       ),
       "unsafe-target",
       [outsidePath]
@@ -134,7 +152,7 @@ suite("project ignore file", () => {
     await symlink(outside, parent, "dir");
     await assertProjectIgnoreFileError(readProjectIgnoreConfigFile(configPath), "unsafe-target", [outside]);
     await assertProjectIgnoreFileError(
-      addProjectIgnoredWarning(configPath, createIgnoredWarning("src/a.ts", "secret", "rule")),
+      addProjectIgnoredRule(configPath, createIgnoredWarning("src/a.ts", "secret", "rule").ruleId),
       "unsafe-target", [outside]
     );
     assert.deepStrictEqual(await readFile(outsideConfig), bytes);
@@ -146,7 +164,7 @@ suite("project ignore file", () => {
     await writeFile(path.dirname(configPath), "preserve me");
     await assertProjectIgnoreFileError(readProjectIgnoreConfigFile(configPath), "unsafe-target", []);
     await assertProjectIgnoreFileError(
-      addProjectIgnoredWarning(configPath, createIgnoredWarning("src/a.ts", "secret", "rule")),
+      addProjectIgnoredRule(configPath, createIgnoredWarning("src/a.ts", "secret", "rule").ruleId),
       "unsafe-target", []
     );
   });

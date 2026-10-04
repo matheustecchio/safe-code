@@ -56,24 +56,23 @@ The cancellable fix is serialized per workspace and refuses tracked `.env` files
 
 ## Ignoring warnings
 
-Use `Safe Code: Ignore this warning` to keep an ignore local to your VS Code workspace storage. This remains the preferred quick fix and does not change project files.
+Use `Safe Code: Ignore this warning` to ignore only the matching occurrence in your local VS Code workspace storage. This remains the preferred quick fix and does not change project files.
 
-Use `Safe Code: Ignore this warning for this project` when the false positive should be shared with the team. This explicit action creates or updates `.vscode/.safe-code.json` inside `.vscode` in the file's workspace folder (creating the directory when needed):
+Use `Safe Code: Ignore this warning type for this project` to suppress every finding from that exact detection rule throughout the file's workspace folder, for everyone sharing its configuration. This also hides future genuine findings from that rule, regardless of file, variable name, line, or value. Other rules remain active. The action creates or updates `.vscode/.safe-code.json` (creating `.vscode` when needed):
 
 ```json
 {
-  "version": 1,
-  "ignoredWarnings": [
-    {
-      "filePath": "src/config.ts",
-      "lineHash": "0123456789abcdef01234567",
-      "ruleId": "generic-secret-assignment"
-    }
-  ]
+  "version": 2,
+  "ignoredWarnings": [],
+  "ignoredRules": ["generic-secret-assignment"]
 }
 ```
 
-Each entry matches the workspace-relative file path, the first 24 hexadecimal characters of the SHA-256 hash of the trimmed source line, and the detection rule ID. Changing the source line makes the old ignore stop matching. In a multi-root workspace, each folder has its own `.vscode/.safe-code.json`.
+`ignoredRules` uses exact stable rule IDs, with no wildcard matching. Each folder in a multi-root workspace has independent configuration; ignoring a rule in one folder does not suppress it in another. Already reported findings are refreshed automatically, even with startup scanning disabled.
+
+Version 1 configurations remain supported without being rewritten on read. Their `ignoredWarnings` entries keep matching only the workspace-relative file path, trimmed source-line hash, and rule ID. The project action upgrades a valid version 1 file to version 2, retains its occurrence entries and any existing ignored rules, and adds only the selected rule. Local ignores and legacy occurrence ignores stop matching when the source line changes. No source text or secret values are stored.
+
+Older extension versions reject version 2 and keep warnings active. Teammates need the updated extension to use these shared rule ignores. Remove an ID from `ignoredRules` to restore that rule's findings, except occurrences still covered by local or legacy ignores.
 
 Safe Code reloads this file when it is created, changed, or deleted. Invalid configuration is reported in the **Safe Code** output channel and suppresses no warnings. The project quick fix will not overwrite an invalid file.
 

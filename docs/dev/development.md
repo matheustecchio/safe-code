@@ -269,10 +269,10 @@ When VS Code asks for code actions, the provider:
 1. Filters diagnostics to only those with `source === "Safe Code"`.
 2. Offers `Safe Code: Move value to .env` for supported generic assignments.
 3. Creates the preferred `Safe Code: Ignore this warning` action for local storage.
-4. Creates `Safe Code: Ignore this warning for this project` for shared configuration.
+4. Creates `Safe Code: Ignore this warning type for this project` for shared configuration.
 5. Passes the file URI, diagnostic range, and rule ID to the selected internal command.
 
-Both ignore commands open the document, read the current line text, store the ignore entry, and rescan the document. The local action never changes project files. The project action is the only path that writes `.vscode/.safe-code.json`; it refuses to overwrite malformed or unsafe configuration targets. Project reads, reloads, and writes are serialized per workspace folder so watcher activity and simultaneous quick fixes cannot lose an update or restore stale cached ignores.
+The local command stores the current occurrence identity and rescans the document. The project command stores the exact diagnostic rule ID, invalidates pending scans, removes already published findings for that rule in the originating workspace folder, and requests a full scan using the existing scheduler. It refreshes unopened files even with startup scanning disabled; direct removal also covers diagnostics beyond the full-scan budgets. A scan already in progress receives one follow-up scan. The local action never changes project files. The project action is the only path that writes `.vscode/.safe-code.json`; it refuses to overwrite malformed or unsafe configuration targets. Project reads, reloads, and writes are serialized per workspace folder so watcher activity and simultaneous quick fixes cannot lose an update or restore stale cached ignores.
 
 ### Move to `.env`
 
@@ -305,7 +305,7 @@ export type IgnoredWarning = {
 };
 ```
 
-Every ignore key is based on:
+Local and legacy occurrence ignore keys are based on:
 
 - A file path.
 - A SHA-256 hash of the trimmed line text, shortened to 24 hex characters.
@@ -313,20 +313,19 @@ Every ignore key is based on:
 
 Local warnings use the workspace folder name plus relative path and are stored in `context.workspaceState` under `safeCode.ignoredWarnings`. They remain local to the user's VS Code workspace storage and are not committed to the project.
 
-Project warnings use a POSIX-style path relative to the workspace folder, not relative to `.vscode`. Each workspace folder has an independent versioned configuration:
+Legacy project occurrence entries use a POSIX-style path relative to the workspace folder, not relative to `.vscode`. Each workspace folder has independent configuration. New project actions write version 2:
 
 ```json
 {
-  "version": 1,
-  "ignoredWarnings": [
-    {
-      "filePath": "src/config.ts",
-      "lineHash": "0123456789abcdef01234567",
-      "ruleId": "generic-secret-assignment"
-    }
-  ]
+  "version": 2,
+  "ignoredWarnings": [],
+  "ignoredRules": ["generic-secret-assignment"]
 }
 ```
+
+`ignoredRules` suppresses exact stable rule IDs across current and future supported files in that workspace folder; it does not compare diagnostic messages or expand wildcards. This deliberately hides future genuine findings of the selected type. Other workspace roots and other rules remain independent. All scan entry points use the same project store filter.
+
+Version 1 is still read with occurrence semantics and is never rewritten on read. An explicit project action upgrades a valid version 1 configuration, retaining all legacy `ignoredWarnings` and previously ignored rules. IDs are deduplicated by exact equality. Version 2 requires both arrays; removing a rule or deleting the configuration triggers a refresh, while local and legacy ignores remain effective. No source text or secret values are persisted. Older extensions reject version 2 and keep warnings active; teammates must update to consume rule ignores. The JSON schema supports both formats.
 
 The parser validates the entire file before accepting any entry. Invalid JSON, unsupported versions, unexpected properties, malformed hashes, empty rule IDs, absolute paths, and parent-directory traversal reject the full project ignore set. Safe Code logs the error to its output channel and keeps warnings active. Duplicate valid entries are collapsed in memory.
 
@@ -465,5 +464,5 @@ The publication concurrency group never cancels an in-progress release. Dry runs
 ## MVP Limitations
 
 - All diagnostics use Warning severity, even though rules already store `low`, `medium`, and `high` internally.
-- Changing the line text changes the line hash, so the old ignore no longer applies.
+- Changing the line text invalidates local and legacy occurrence ignores; project rule ignores continue to apply.
 - Detection is regex-based and intentionally avoids entropy detection for now.

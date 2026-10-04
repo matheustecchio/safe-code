@@ -5,6 +5,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 import type { WorkspaceScanResult } from "../../src/extension";
 import { hashLineText } from "../../src/ignoreCore";
+import { ProjectIgnoreStore } from "../../src/projectIgnoreStore";
 import {
   DEFAULT_MAX_FILE_SIZE_BYTES,
   DEFAULT_MAX_WORKSPACE_SCAN_BYTES,
@@ -604,8 +605,8 @@ suite("Safe Code extension", () => {
     await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
     await vscode.commands.executeCommand("safeCode.ignoreWarningForProject", uri, 0, "generic-secret-assignment");
     assert.deepStrictEqual(await vscode.workspace.fs.readFile(legacyUri), bytes);
-    assert.strictEqual(JSON.parse(await readWorkspaceText(projectConfigUri)).ignoredWarnings[0].filePath,
-      getWorkspaceRelativePath(uri));
+    assert.deepStrictEqual(JSON.parse(await readWorkspaceText(projectConfigUri)).ignoredRules,
+      ["generic-secret-assignment"]);
   });
 
   test("reloads project ignores when configuration is created and deleted", async () => {
@@ -641,7 +642,7 @@ suite("Safe Code extension", () => {
 
     const actions = await requestCodeActions(projectUri, projectDiagnostics[0].range);
     const projectAction = actions.find((candidate): candidate is vscode.CodeAction => {
-      return candidate instanceof vscode.CodeAction && candidate.title === "Safe Code: Ignore this warning for this project";
+      return candidate instanceof vscode.CodeAction && candidate.title === "Safe Code: Ignore this warning type for this project";
     });
     assert.ok(projectAction?.command, "The Safe Code project ignore quick fix was not returned");
     assert.strictEqual(projectAction.command.command, "safeCode.ignoreWarningForProject");
@@ -653,17 +654,12 @@ suite("Safe Code extension", () => {
     const projectConfigBeforeLocalIgnore = await vscode.workspace.fs.readFile(projectConfigUri);
     const parsedConfig = JSON.parse(Buffer.from(projectConfigBeforeLocalIgnore).toString("utf8"));
     assert.deepStrictEqual(parsedConfig, {
-      version: 1,
-      ignoredWarnings: [
-        {
-          filePath: getWorkspaceRelativePath(projectUri),
-          lineHash: hashLineText(projectLine),
-          ruleId: "generic-secret-assignment"
-        }
-      ]
+      version: 2,
+      ignoredWarnings: [],
+      ignoredRules: ["generic-secret-assignment"]
     });
 
-    const localUri = await createWorkspaceFile("local-alongside-project.ts", 'const token = "local-ignore-secret";');
+    const localUri = await createWorkspaceFile("local-alongside-project.ts", '-----BEGIN PRIVATE KEY-----');
     const localDiagnostics = await eventually(() => getSafeCodeDiagnostics(localUri), (items) => items.length === 1);
     await vscode.commands.executeCommand(
       "safeCode.ignoreWarning",
@@ -677,6 +673,77 @@ suite("Safe Code extension", () => {
     assert.deepStrictEqual(getSafeCodeDiagnostics(localUri), []);
     const projectConfigAfterLocalIgnore = await vscode.workspace.fs.readFile(projectConfigUri);
     assert.deepStrictEqual(projectConfigAfterLocalIgnore, projectConfigBeforeLocalIgnore);
+  });
+
+  test("ignores an exact rule across files, pending scans, future edits, and only one workspace root", async () => {
+    const secondRoot = vscode.workspace.workspaceFolders?.[1]?.uri;
+    assert.ok(secondRoot, "The integration fixture must contain a second workspace root");
+    const otherUri = vscode.Uri.joinPath(secondRoot, "other.ts");
+    const source = 'const apiKey = "project-wide-alpha-secret";';
+    await vscode.workspace.fs.writeFile(otherUri, Buffer.from(source));
+    try {
+      const first = await createWorkspaceFile("rule-wide-first.ts", source + '\nconst token = "project-wide-beta-secret";');
+      const second = await createWorkspaceFile("rule-wide-second.ts", 'const clientSecret = "project-wide-gamma-secret";\n-----BEGIN PRIVATE KEY-----');
+      await eventually(() => [getSafeCodeDiagnostics(first).length, getSafeCodeDiagnostics(second).length,
+        getSafeCodeDiagnostics(otherUri).length], (counts) => counts.join() === "2,2,1");
+      // The second file has never been opened in an editor. Queue a change and overlap a workspace scan.
+      await vscode.workspace.fs.writeFile(second, Buffer.from('const token = "pending-delta-secret";\n-----BEGIN PRIVATE KEY-----'));
+      const pendingScan = vscode.commands.executeCommand("safeCode.scanWorkspace");
+      await vscode.commands.executeCommand("safeCode.ignoreWarningForProject", first, 0, "generic-secret-assignment");
+      await pendingScan;
+      await eventually(() => [getSafeCodeDiagnostics(first), getSafeCodeDiagnostics(second), getSafeCodeDiagnostics(otherUri)],
+        (groups) => groups[0].length === 0 && groups[1].length === 1 && groups[1][0].code === "private-key" && groups[2].length === 1);
+      await assert.rejects(fs.stat(vscode.Uri.joinPath(secondRoot, ".vscode", ".safe-code.json").fsPath),
+        (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+      const output = vscode.window.createOutputChannel("Safe Code fresh store test");
+      try {
+        const freshStore = new ProjectIgnoreStore(output);
+        await freshStore.reloadAll();
+        assert.ok(freshStore.isIgnored(first, "completely different source", "generic-secret-assignment"));
+        assert.ok(!freshStore.isIgnored(otherUri, source, "generic-secret-assignment"));
+        assert.ok(!freshStore.isIgnored(first, source, "generic-secret-assignment-other"));
+      } finally { output.dispose(); }
+      const future = await createWorkspaceFile("rule-wide-future.ts", 'const token = "future-epsilon-secret";\n-----BEGIN PRIVATE KEY-----');
+      await eventually(() => getSafeCodeDiagnostics(future), (items) => items.length === 1 && items[0].code === "private-key");
+      const doc = await vscode.workspace.openTextDocument(first);
+      const edit = new vscode.WorkspaceEdit();
+      edit.insert(first, new vscode.Position(doc.lineCount, 0), '\nconst token = "edited-zeta-secret";\n-----BEGIN PRIVATE KEY-----');
+      await vscode.workspace.applyEdit(edit);
+      await eventually(() => getSafeCodeDiagnostics(first), (items) => items.length === 1 && items[0].code === "private-key");
+      await vscode.commands.executeCommand("safeCode.scanOpenFiles");
+      assert.ok(getSafeCodeDiagnostics(first).every((item) => item.code === "private-key"));
+      await deleteIfExists(projectConfigUri);
+      await eventually(() => getSafeCodeDiagnostics(second), (items) => items.length === 2);
+      await vscode.workspace.fs.writeFile(projectConfigUri, Buffer.from(JSON.stringify({ version: 2,
+        ignoredWarnings: [], ignoredRules: ["generic-secret-assignment"] })));
+      await eventually(() => getSafeCodeDiagnostics(second), (items) => items.length === 1);
+      await vscode.workspace.fs.writeFile(projectConfigUri, Buffer.from(JSON.stringify({ version: 2,
+        ignoredWarnings: [], ignoredRules: [] })));
+      await eventually(() => getSafeCodeDiagnostics(second), (items) => items.length === 2);
+    } finally {
+      await deleteIfExists(otherUri);
+    }
+  });
+
+  test("retains local and legacy occurrence ignores when a shared rule is removed", async () => {
+    const local = await createWorkspaceFile("retain-local.ts", 'const token = "local-retained-secret";');
+    const legacyLine = 'const token = "legacy-retained-secret";';
+    const legacy = await createWorkspaceFile("retain-legacy.ts", legacyLine);
+    const visible = await createWorkspaceFile("retain-visible.ts", 'const token = "visible-retained-secret";');
+    await eventually(() => getSafeCodeDiagnostics(local), (items) => items.length === 1);
+    await vscode.commands.executeCommand("safeCode.ignoreWarning", local, 0, "generic-secret-assignment");
+    const occurrence = { filePath: getWorkspaceRelativePath(legacy), lineHash: hashLineText(legacyLine),
+      ruleId: "generic-secret-assignment" };
+    await writeProjectConfig([occurrence]);
+    await eventually(() => [getSafeCodeDiagnostics(local), getSafeCodeDiagnostics(legacy), getSafeCodeDiagnostics(visible)],
+      (groups) => groups[0].length === 0 && groups[1].length === 0 && groups[2].length === 1);
+    await vscode.commands.executeCommand("safeCode.ignoreWarningForProject", visible, 0, "generic-secret-assignment");
+    assert.deepStrictEqual(JSON.parse(await readWorkspaceText(projectConfigUri)), { version: 2,
+      ignoredWarnings: [occurrence], ignoredRules: ["generic-secret-assignment"] });
+    await vscode.workspace.fs.writeFile(projectConfigUri, Buffer.from(JSON.stringify({ version: 2,
+      ignoredWarnings: [occurrence], ignoredRules: [] })));
+    await eventually(() => [getSafeCodeDiagnostics(local), getSafeCodeDiagnostics(legacy), getSafeCodeDiagnostics(visible)],
+      (groups) => groups[0].length === 0 && groups[1].length === 0 && groups[2].length === 1);
   });
 
   test("serializes simultaneous project-ignore updates without losing entries", async () => {
@@ -705,18 +772,14 @@ suite("Safe Code extension", () => {
     ]);
 
     const parsedConfig = JSON.parse(await readWorkspaceText(projectConfigUri));
-    assert.deepStrictEqual(parsedConfig.ignoredWarnings, [
-      {
-        filePath: getWorkspaceRelativePath(firstUri),
-        lineHash: hashLineText(firstLine),
-        ruleId: "generic-secret-assignment"
-      },
-      {
-        filePath: getWorkspaceRelativePath(secondUri),
-        lineHash: hashLineText(secondLine),
-        ruleId: "generic-secret-assignment"
-      }
+    assert.deepStrictEqual(parsedConfig, { version: 2, ignoredWarnings: [],
+      ignoredRules: ["generic-secret-assignment"] });
+    await Promise.all([
+      vscode.commands.executeCommand("safeCode.ignoreWarningForProject", firstUri, 0, "private-key"),
+      vscode.commands.executeCommand("safeCode.ignoreWarningForProject", secondUri, 0, "other-rule")
     ]);
+    assert.deepStrictEqual(JSON.parse(await readWorkspaceText(projectConfigUri)).ignoredRules.sort(),
+      ["generic-secret-assignment", "other-rule", "private-key"]);
     await eventually(
       () => [getSafeCodeDiagnostics(firstUri), getSafeCodeDiagnostics(secondUri)],
       (diagnostics) => diagnostics.every((items) => items.length === 0)
@@ -832,7 +895,7 @@ suite("Safe Code extension", () => {
       actions.some(
         (candidate) =>
           candidate instanceof vscode.CodeAction &&
-          candidate.title === "Safe Code: Ignore this warning for this project"
+          candidate.title === "Safe Code: Ignore this warning type for this project"
       ),
       "The project ignore quick fix was removed"
     );

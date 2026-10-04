@@ -813,8 +813,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
 
         try {
-          await projectIgnoreStore.add(uri, document.lineAt(line).text, ruleId);
-          scanNow(document);
+          await projectIgnoreStore.add(uri, ruleId);
+          invalidateScanState();
+          // Remove already published findings, including unopened files and files beyond scan budgets.
+          const workspaceKey = vscode.workspace.getWorkspaceFolder(uri)?.uri.toString();
+          for (const [diagnosticUri, items] of diagnostics) {
+            if (vscode.workspace.getWorkspaceFolder(diagnosticUri)?.uri.toString() === workspaceKey) {
+              const remaining = items.filter((item) => String(item.code) !== ruleId);
+              diagnostics.set(diagnosticUri, remaining);
+              if (remaining.length === 0) {
+                diagnosticUris.delete(diagnosticUri.toString());
+              }
+            }
+          }
+          await scanWorkspace(false);
         } catch (error) {
           const message = `Safe Code could not update ${projectIgnoreConfigFileName}. ${getProjectIgnoreFileErrorMessage(
             error,
@@ -939,12 +951,12 @@ class SafeCodeActionProvider implements vscode.CodeActionProvider {
       localAction.isPreferred = true;
 
       const projectAction = new vscode.CodeAction(
-        "Safe Code: Ignore this warning for this project",
+        "Safe Code: Ignore this warning type for this project",
         vscode.CodeActionKind.QuickFix
       );
       projectAction.command = {
         command: ignoreWarningForProjectCommand,
-        title: "Ignore this warning for this project",
+        title: "Ignore this warning type for this project",
         arguments: [document.uri, diagnostic.range.start.line, ruleId]
       };
       projectAction.diagnostics = [diagnostic];

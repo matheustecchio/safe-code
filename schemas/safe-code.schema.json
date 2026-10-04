@@ -9,12 +9,15 @@
   ],
   "properties": {
     "version": {
-      "const": 1,
-      "description": "Safe Code project ignore configuration format version."
+      "description": "Safe Code project ignore configuration format version.",
+      "enum": [
+        1,
+        2
+      ]
     },
     "ignoredWarnings": {
       "type": "array",
-      "description": "Warnings shared by the project and ignored for every workspace user.",
+      "description": "Legacy occurrence ignores matched by path, trimmed line hash, and exact rule ID.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -27,7 +30,7 @@
           "filePath": {
             "type": "string",
             "minLength": 1,
-            "description": "POSIX-style path relative to the workspace folder containing .safe-code.json."
+            "description": "POSIX-style path relative to the workspace folder, not to .vscode."
           },
           "lineHash": {
             "type": "string",
@@ -41,6 +44,39 @@
           }
         }
       }
+    },
+    "ignoredRules": {
+      "type": "array",
+      "description": "Version 2: exact rule IDs ignored throughout this workspace folder, including future genuine findings. No wildcard matching.",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+      }
     }
-  }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "version": {
+          "const": 1
+        }
+      },
+      "not": {
+        "required": [
+          "ignoredRules"
+        ]
+      }
+    },
+    {
+      "properties": {
+        "version": {
+          "const": 2
+        }
+      },
+      "required": [
+        "ignoredRules"
+      ]
+    }
+  ]
 }
