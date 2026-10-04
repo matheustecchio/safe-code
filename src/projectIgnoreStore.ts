@@ -125,7 +125,7 @@ export class ProjectIgnoreStore {
 }
 
 function getConfigUri(workspaceFolder: vscode.WorkspaceFolder): vscode.Uri {
-  return vscode.Uri.joinPath(workspaceFolder.uri, projectIgnoreConfigFileName);
+  return vscode.Uri.joinPath(workspaceFolder.uri, ...projectIgnoreConfigFileName.split("/"));
 }
 
 function getConfigPath(

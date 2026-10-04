@@ -1,6 +1,6 @@
 import { randomBytes } from "crypto";
 import { BigIntStats, constants } from "fs";
-import { FileHandle, lstat, open, rename, unlink } from "fs/promises";
+import { FileHandle, lstat, mkdir, open, rename, unlink } from "fs/promises";
 import * as path from "path";
 import {
   IgnoredWarning,
@@ -10,7 +10,7 @@ import {
   serializeProjectIgnoreConfig
 } from "./ignoreCore";
 
-export const projectIgnoreConfigFileName = ".safe-code.json";
+export const projectIgnoreConfigFileName = ".vscode/.safe-code.json";
 
 export type ProjectIgnoreFileErrorCode =
   | "concurrent-modification"
@@ -30,10 +30,10 @@ export class ProjectIgnoreFileError extends Error {
 }
 
 const projectIgnoreFileErrorMessages: Record<ProjectIgnoreFileErrorCode, string> = {
-  "concurrent-modification": `${projectIgnoreConfigFileName} changed while Safe Code was updating it. No project ignore was written.`,
+  "concurrent-modification": `${projectIgnoreConfigFileName} changed while Safe Code was updating it. The update could not be verified; check the configuration before retrying.`,
   "invalid-configuration": `${projectIgnoreConfigFileName} is invalid and was not changed.`,
   "read-failed": `Safe Code could not safely read ${projectIgnoreConfigFileName}.`,
-  "unsafe-target": `${projectIgnoreConfigFileName} must be a regular file. Symbolic links and other file types are not allowed.`,
+  "unsafe-target": `${projectIgnoreConfigFileName} must be a regular file inside a real .vscode directory. Symbolic links and other file types are not allowed.`,
   "write-failed": `Safe Code could not safely write ${projectIgnoreConfigFileName}.`
 };
 
@@ -50,8 +50,9 @@ type FileIdentity = Readonly<{
 }>;
 
 export type ProjectIgnoreFileSnapshot =
-  | Readonly<{ kind: "missing" }>
+  | Readonly<{ kind: "missing"; parent?: FileIdentity }>
   | Readonly<{
+      parent: FileIdentity;
       bytes: Buffer;
       identity: FileIdentity;
       kind: "regular";
@@ -62,7 +63,6 @@ export type ProjectIgnoreFileUpdate = Readonly<{
   config: ProjectIgnoreConfig;
 }>;
 
-const missingSnapshot: ProjectIgnoreFileSnapshot = { kind: "missing" };
 const noFollowFlag = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
 const nonBlockingFlag = typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0;
 
@@ -106,9 +106,14 @@ export async function addProjectIgnoredWarning(
 }
 
 export async function readProjectIgnoreFileSnapshot(configPath: string): Promise<ProjectIgnoreFileSnapshot> {
+  const parent = await inspectParent(configPath);
+  if (!parent) {
+    return { kind: "missing" };
+  }
   const pathStat = await inspectConfigPath(configPath, "read");
   if (!pathStat) {
-    return missingSnapshot;
+    await validateParent(configPath, parent);
+    return { kind: "missing", parent };
   }
 
   let handle: FileHandle;
@@ -139,6 +144,7 @@ export async function readProjectIgnoreFileSnapshot(configPath: string): Promise
       throw createFileError("read-failed");
     }
 
+    await validateParent(configPath, parent);
     const afterRead = await safeHandleStat(handle, "read");
     const finalPathStat = await inspectConfigPath(configPath, "revalidate");
     if (
@@ -151,6 +157,7 @@ export async function readProjectIgnoreFileSnapshot(configPath: string): Promise
     }
 
     snapshot = {
+      parent,
       bytes,
       identity: toIdentity(afterRead),
       kind: "regular"
@@ -169,12 +176,29 @@ export async function writeProjectIgnoreFile(
   expected: ProjectIgnoreFileSnapshot,
   nextBytes: Buffer
 ): Promise<void> {
+  let parent = expected.parent;
+  if (!parent) {
+    try {
+      await mkdir(path.dirname(configPath), { mode: 0o700 });
+    } catch (error) {
+      if (!isErrno(error, "EEXIST")) {
+        throw createFileError("write-failed");
+      }
+    }
+    parent = await inspectParent(configPath);
+    if (!parent) {
+      throw createFileError("concurrent-modification");
+    }
+  }
+  await validateParent(configPath, parent);
   if (expected.kind === "missing") {
     await createProjectIgnoreFile(configPath, nextBytes);
+    await validateParent(configPath, parent);
     return;
   }
 
   await replaceProjectIgnoreFile(configPath, expected, nextBytes);
+  await validateParent(configPath, parent);
 }
 
 async function createProjectIgnoreFile(configPath: string, nextBytes: Buffer): Promise<void> {
@@ -233,6 +257,7 @@ async function replaceProjectIgnoreFile(
       throw createFileError("concurrent-modification");
     }
 
+    await validateParent(configPath, expected.parent);
     try {
       await rename(temporaryPath.path, configPath);
       replaced = true;
@@ -317,6 +342,28 @@ async function verifyWrittenFile(configPath: string, expectedIdentity: FileIdent
     !sameIdentity(expectedIdentity, written.identity) ||
     !written.bytes.equals(expectedBytes)
   ) {
+    throw createFileError("concurrent-modification");
+  }
+}
+
+async function inspectParent(configPath: string): Promise<FileIdentity | undefined> {
+  try {
+    const stat = await lstat(path.dirname(configPath), { bigint: true });
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw createFileError("unsafe-target");
+    }
+    return toIdentity(stat);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) {
+      return undefined;
+    }
+    throw asFileError(error, "read-failed");
+  }
+}
+
+async function validateParent(configPath: string, expected: FileIdentity): Promise<void> {
+  const current = await inspectParent(configPath);
+  if (!current || !sameIdentity(expected, current)) {
     throw createFileError("concurrent-modification");
   }
 }

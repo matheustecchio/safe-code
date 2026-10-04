@@ -138,13 +138,13 @@ safe-code/
 | `src/environmentMigrationCore.ts` | Serializes migrations per workspace, checks cancellation, journals mutations, and coordinates reverse-order rollback without importing VS Code. |
 | `src/environmentStore.ts` | Takes exact no-follow snapshots, verifies Git protection, and conditionally updates or restores `.gitignore`, `.env.example`, and `.env`. |
 | `src/ignoreCore.ts` | Contains VS Code-independent ignore identity, validation, parsing, and serialization logic. |
-| `src/projectIgnoreFile.ts` | Performs no-follow reads, stable snapshot validation, and atomic Node filesystem updates for `.safe-code.json`. |
+| `src/projectIgnoreFile.ts` | Performs no-follow reads, stable snapshot validation, and atomic Node filesystem updates for `.vscode/.safe-code.json`. |
 | `src/scanner.ts` | Decides which documents can be scanned and turns regex matches into `SecretFinding` objects. |
 | `src/scannerCore.ts` | Contains VS Code-independent file filtering and text scanning logic. |
 | `src/workspaceScanCore.ts` | Contains VS Code-independent scan budgets, UTF-8 sizing, bounded queueing, active scan guards, and cleanup policy. |
 | `src/rules.ts` | Defines the secret detection rules and their messages. |
 | `src/ignoreStore.ts` | Stores and checks locally ignored warnings. |
-| `src/projectIgnoreStore.ts` | Loads, matches, and explicitly updates `.safe-code.json` for each workspace folder. |
+| `src/projectIgnoreStore.ts` | Loads, matches, and explicitly updates `.vscode/.safe-code.json` for each workspace folder. |
 | `schemas/safe-code.schema.json` | Provides VS Code validation and editor help for project ignore configuration. |
 | `docs/dev/development.md` | Core developer workflow and architecture documentation. |
 | `docs/dev/rules.md` | Detection rule documentation. |
@@ -177,14 +177,14 @@ The activation function is `activate(context)` in `src/extension.ts`.
 
 - `onDidOpenTextDocument` queues a scan when a file opens.
 - `onDidChangeTextDocument` queues a scan when a file changes.
-- `FileSystemWatcher.onDidCreate` and `onDidChange` queue scans for files changed inside or outside an editor. Changes to a root `.safe-code.json` reload project ignores and request a workspace rescan.
-- `FileSystemWatcher.onDidDelete` removes diagnostics for deleted files. Deleting `.safe-code.json` reloads the now-empty project ignore set and restores matching warnings.
+- `FileSystemWatcher.onDidCreate` and `onDidChange` queue scans for files changed inside or outside an editor. Changes to `.vscode/.safe-code.json` reload project ignores and request a workspace rescan.
+- `FileSystemWatcher.onDidDelete` removes diagnostics for deleted files. Deleting `.vscode/.safe-code.json` reloads the now-empty project ignore set and restores matching warnings.
 - `onDidChangeActiveTextEditor` queues a scan when the active editor changes.
 - `onDidChangeConfiguration` clears stale results and repeats the automatic workspace scan, or rescans open files when startup scanning is disabled.
 - `onDidChangeWorkspaceFolders` reloads project configuration and scans the updated workspace.
 - `registerCodeActionsProvider` provides local and project-level ignore quick fixes.
 - `safeCode.ignoreWarning` stores a local ignore entry and rescans the document.
-- `safeCode.ignoreWarningForProject` adds an entry to the containing workspace folder's `.safe-code.json` and rescans the document.
+- `safeCode.ignoreWarningForProject` adds an entry to the containing workspace folder's `.vscode/.safe-code.json` and rescans the document.
 - `safeCode.scanOpenFiles` rescans open workspace files.
 - `safeCode.scanWorkspace` scans supported files across all open workspace folders.
 
@@ -272,7 +272,7 @@ When VS Code asks for code actions, the provider:
 4. Creates `Safe Code: Ignore this warning for this project` for shared configuration.
 5. Passes the file URI, diagnostic range, and rule ID to the selected internal command.
 
-Both ignore commands open the document, read the current line text, store the ignore entry, and rescan the document. The local action never changes project files. The project action is the only path that writes `.safe-code.json`; it refuses to overwrite malformed or unsafe configuration targets. Project reads, reloads, and writes are serialized per workspace folder so watcher activity and simultaneous quick fixes cannot lose an update or restore stale cached ignores.
+Both ignore commands open the document, read the current line text, store the ignore entry, and rescan the document. The local action never changes project files. The project action is the only path that writes `.vscode/.safe-code.json`; it refuses to overwrite malformed or unsafe configuration targets. Project reads, reloads, and writes are serialized per workspace folder so watcher activity and simultaneous quick fixes cannot lose an update or restore stale cached ignores.
 
 ### Move to `.env`
 
@@ -313,7 +313,7 @@ Every ignore key is based on:
 
 Local warnings use the workspace folder name plus relative path and are stored in `context.workspaceState` under `safeCode.ignoredWarnings`. They remain local to the user's VS Code workspace storage and are not committed to the project.
 
-Project warnings use a POSIX-style path relative to the workspace folder containing `.safe-code.json`. Each workspace folder has an independent versioned configuration:
+Project warnings use a POSIX-style path relative to the workspace folder, not relative to `.vscode`. Each workspace folder has an independent versioned configuration:
 
 ```json
 {
@@ -330,7 +330,11 @@ Project warnings use a POSIX-style path relative to the workspace folder contain
 
 The parser validates the entire file before accepting any entry. Invalid JSON, unsupported versions, unexpected properties, malformed hashes, empty rule IDs, absolute paths, and parent-directory traversal reject the full project ignore set. Safe Code logs the error to its output channel and keeps warnings active. Duplicate valid entries are collapsed in memory.
 
-The file layer inspects `.safe-code.json` without following symbolic links, reads regular files through an opened descriptor, and checks the descriptor and path identity before accepting a stable byte snapshot. Symbolic links, directories, other non-regular entries, non-file workspace URIs, and concurrent changes are rejected with fixed messages that do not include configuration contents or parser details.
+The `.vscode` directory is created only on an explicit project-ignore write. Reads and writes check for and reject existing symbolic-link or non-directory parents and revalidate parent identity around file operations. Legacy workspace-root `.safe-code.json` files are inactive; users must move them manually without changing workspace-relative entry paths.
+
+The file layer uses `lstat` and a no-follow file open where supported, reads regular files through an opened descriptor, and checks the descriptor and path identity before accepting a stable byte snapshot. Detected symbolic links, directories, other non-regular entries, non-file workspace URIs, and concurrent changes are rejected with fixed messages that do not include configuration contents or parser details.
+
+The project-ignore threat model excludes a malicious local process changing filesystem paths concurrently. File operations resolve the parent path separately from its identity checks: these checks do not eliminate a time-of-check/time-of-use race in `.vscode`. A process swapping and restoring that directory during I/O can redirect a read or write. An error after a write does not guarantee that no filesystem changes occurred; users should inspect the configuration before retrying. This portable implementation adds no native filesystem helper.
 
 The project quick fix creates a missing configuration with an exclusive final-path open. For an existing valid file, it writes an exclusively created sibling temporary file, preserves the existing permission mode, revalidates the original identity and exact bytes, and atomically renames the temporary file into place. A post-write check must succeed before the in-memory ignore cache is updated. On any read, validation, or write failure, cached project ignores for that workspace are removed so warnings remain active. File-system watcher events reload configuration created or edited outside Safe Code. `package.json` associates the configuration file with `schemas/safe-code.schema.json` for editor validation.
 

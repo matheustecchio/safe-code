@@ -10,7 +10,7 @@ Safe Code is a lightweight VS Code extension that detects possible hardcoded sec
 - Adds VS Code diagnostics so matches appear as yellow warning underlines and in the Problems tab.
 - Moves supported JavaScript and TypeScript secret assignments to local environment configuration with a quick fix.
 - Provides local and shared-project quick fixes for known false positives.
-- Stores personal ignores locally in VS Code workspace storage and team ignores in `.safe-code.json`.
+- Stores personal ignores locally in VS Code workspace storage and team ignores in `.vscode/.safe-code.json`.
 - Skips noisy dependency/build folders such as `node_modules`, `.git`, `dist`, `build`, and `coverage`.
 
 ## Supported files
@@ -58,7 +58,7 @@ The cancellable fix is serialized per workspace and refuses tracked `.env` files
 
 Use `Safe Code: Ignore this warning` to keep an ignore local to your VS Code workspace storage. This remains the preferred quick fix and does not change project files.
 
-Use `Safe Code: Ignore this warning for this project` when the false positive should be shared with the team. This explicit action creates or updates `.safe-code.json` at the root of the file's workspace folder:
+Use `Safe Code: Ignore this warning for this project` when the false positive should be shared with the team. This explicit action creates or updates `.vscode/.safe-code.json` inside `.vscode` in the file's workspace folder (creating the directory when needed):
 
 ```json
 {
@@ -73,9 +73,13 @@ Use `Safe Code: Ignore this warning for this project` when the false positive sh
 }
 ```
 
-Each entry matches the workspace-relative file path, the first 24 hexadecimal characters of the SHA-256 hash of the trimmed source line, and the detection rule ID. Changing the source line makes the old ignore stop matching. In a multi-root workspace, each folder has its own `.safe-code.json`.
+Each entry matches the workspace-relative file path, the first 24 hexadecimal characters of the SHA-256 hash of the trimmed source line, and the detection rule ID. Changing the source line makes the old ignore stop matching. In a multi-root workspace, each folder has its own `.vscode/.safe-code.json`.
 
 Safe Code reloads this file when it is created, changed, or deleted. Invalid configuration is reported in the **Safe Code** output channel and suppresses no warnings. The project quick fix will not overwrite an invalid file.
+
+Existing root-level `.safe-code.json` files are no longer loaded or updated. Move the file manually to `.vscode/.safe-code.json` to keep its shared ignores; entry paths remain relative to the workspace root.
+
+For safety, `.vscode/.safe-code.json` must be either missing or a regular file, and its `.vscode` parent must be a real directory rather than a symbolic link. Safe Code checks for and rejects existing symbolic links and other unsupported filesystem entry types. A missing configuration is created exclusively; an existing valid configuration is revalidated against the exact bytes and file identity that were read before it is replaced atomically. If a concurrent change is detected, the operation reports an error and the in-memory project ignores fail closed; a write may already have occurred. These checks do not protect against a malicious local process changing filesystem paths during an operation.
 
 ## Release integrity
 
@@ -84,8 +88,6 @@ The release workflow builds and tests the extension once with pinned Node.js, VS
 Pull requests and `publish: false` manual runs exercise the complete build, test, and packaging path without publishing. GitHub Release publication requires a manual run from `main` with an exact expected version; ordinary runs do not publish to the Marketplace or need Marketplace credentials. The GitHub Release is public before the manual Marketplace upload. The Marketplace signs and repackages extensions, so its public download bytes can differ from the uploaded VSIX; the GitHub asset and recorded digest preserve the original build artifact for independent verification.
 
 Version `1.0.0` is already published in the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=matheus-tecchio.safe-code) and as [GitHub Release v1.0.0](https://github.com/matheustecchio/safe-code/releases/tag/v1.0.0). Do not dispatch the retained `1.0.0` incident recovery: its required absence checks are no longer true. The ordinary release path also rejects `1.0.0`; use the GitHub-first workflow above for future versions. The [development guide](./docs/dev/development.md#incident-recovery-for-the-ambiguous-100-attempt) records the historical recovery gates.
-
-For safety, `.safe-code.json` must be either missing or a regular file. Safe Code refuses symbolic links, directories, and other filesystem entry types, and it never follows a link to read or update project ignores. A missing configuration is created exclusively; an existing valid configuration is revalidated against the exact bytes and file identity that were read before it is replaced atomically. If the path or contents change during the operation, the update stops and the in-memory project ignores fail closed.
 
 ## Documentation
 

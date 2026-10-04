@@ -1,5 +1,5 @@
 import * as assert from "assert";
-import { mkdtemp, mkdir, lstat, readFile, readdir, rm, stat, symlink, writeFile } from "fs/promises";
+import { mkdtemp, mkdir, lstat, readFile, readdir, rename, rm, stat, symlink, writeFile } from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 import { createIgnoredWarning, serializeProjectIgnoreConfig } from "../../src/ignoreCore";
@@ -22,8 +22,8 @@ suite("project ignore file", () => {
   setup(async () => {
     temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "safe-code-project-ignore-"));
     workspaceRoot = path.join(temporaryRoot, "workspace");
-    configPath = path.join(workspaceRoot, ".safe-code.json");
-    await mkdir(workspaceRoot);
+    configPath = path.join(workspaceRoot, ".vscode", ".safe-code.json");
+    await mkdir(path.dirname(configPath), { recursive: true });
   });
 
   teardown(async () => {
@@ -31,6 +31,8 @@ suite("project ignore file", () => {
   });
 
   test("creates a missing configuration exclusively with restrictive permissions", async () => {
+    await rm(path.dirname(configPath), { recursive: true });
+    assert.deepStrictEqual(await readProjectIgnoreConfigFile(configPath), { version: 1, ignoredWarnings: [] });
     const warning = createIgnoredWarning("src/missing.ts", "const token = secret;", "generic-secret-assignment");
 
     const update = await addProjectIgnoredWarning(configPath, warning);
@@ -41,6 +43,17 @@ suite("project ignore file", () => {
     if (process.platform !== "win32") {
       assert.strictEqual((await stat(configPath)).mode & 0o777, 0o600);
     }
+  });
+
+  test("keeps workspace folders isolated and preserves existing editor settings", async () => {
+    const otherConfig = path.join(temporaryRoot, "other-workspace", ".vscode", ".safe-code.json");
+    await mkdir(path.dirname(otherConfig), { recursive: true });
+    const settingsPath = path.join(path.dirname(configPath), "settings.json");
+    await writeFile(settingsPath, '{"editor.tabSize":2}');
+    const warning = createIgnoredWarning("src/a.ts", "secret", "rule");
+    await addProjectIgnoredWarning(configPath, warning);
+    assert.deepStrictEqual(await readProjectIgnoreConfigFile(otherConfig), { version: 1, ignoredWarnings: [] });
+    assert.strictEqual(await readFile(settingsPath, "utf8"), '{"editor.tabSize":2}');
   });
 
   test("atomically replaces a valid regular configuration and preserves its mode", async () => {
@@ -63,7 +76,7 @@ suite("project ignore file", () => {
       assert.strictEqual(updatedStat.mode & 0o777, originalStat.mode & 0o777);
       assert.notStrictEqual(updatedStat.ino, originalStat.ino);
     }
-    assert.deepStrictEqual(await readdir(workspaceRoot), [".safe-code.json"]);
+    assert.deepStrictEqual(await readdir(path.dirname(configPath)), [".safe-code.json"]);
   });
 
   test("rejects invalid configuration without exposing or changing its bytes", async () => {
@@ -110,6 +123,50 @@ suite("project ignore file", () => {
     assert.deepStrictEqual(await readFile(outsidePath), outsideBytes);
   });
 
+  test("rejects a symlinked parent without reading or writing outside the workspace", async () => {
+    const parent = path.dirname(configPath);
+    const outside = path.join(temporaryRoot, "outside");
+    await mkdir(outside);
+    const outsideConfig = path.join(outside, ".safe-code.json");
+    const bytes = Buffer.from(serializeProjectIgnoreConfig({ version: 1, ignoredWarnings: [] }));
+    await writeFile(outsideConfig, bytes);
+    await rm(parent, { recursive: true });
+    await symlink(outside, parent, "dir");
+    await assertProjectIgnoreFileError(readProjectIgnoreConfigFile(configPath), "unsafe-target", [outside]);
+    await assertProjectIgnoreFileError(
+      addProjectIgnoredWarning(configPath, createIgnoredWarning("src/a.ts", "secret", "rule")),
+      "unsafe-target", [outside]
+    );
+    assert.deepStrictEqual(await readFile(outsideConfig), bytes);
+    assert.deepStrictEqual(await readdir(outside), [".safe-code.json"]);
+  });
+
+  test("rejects a file in place of the parent directory", async () => {
+    await rm(path.dirname(configPath), { recursive: true });
+    await writeFile(path.dirname(configPath), "preserve me");
+    await assertProjectIgnoreFileError(readProjectIgnoreConfigFile(configPath), "unsafe-target", []);
+    await assertProjectIgnoreFileError(
+      addProjectIgnoredWarning(configPath, createIgnoredWarning("src/a.ts", "secret", "rule")),
+      "unsafe-target", []
+    );
+  });
+
+  test("rejects parent replacement after a snapshot, including when the file is missing", async () => {
+    for (const exists of [false, true]) {
+      if (exists) {
+        await writeFile(configPath, serializeProjectIgnoreConfig({ version: 1, ignoredWarnings: [] }));
+      }
+      const snapshot = await readProjectIgnoreFileSnapshot(configPath);
+      await rename(path.dirname(configPath), path.join(workspaceRoot, `old-${exists}`));
+      await mkdir(path.dirname(configPath));
+      await assertProjectIgnoreFileError(
+        writeProjectIgnoreFile(configPath, snapshot, Buffer.from('{"version":1,"ignoredWarnings":[]}')),
+        "concurrent-modification", []
+      );
+      assert.deepStrictEqual(await readdir(path.dirname(configPath)), []);
+    }
+  });
+
   test("rejects a directory as a non-regular configuration target", async () => {
     await mkdir(configPath);
 
@@ -143,7 +200,7 @@ suite("project ignore file", () => {
     );
 
     assert.deepStrictEqual(await readFile(configPath), concurrentBytes);
-    assert.deepStrictEqual(await readdir(workspaceRoot), [".safe-code.json"]);
+    assert.deepStrictEqual(await readdir(path.dirname(configPath)), [".safe-code.json"]);
   });
 
   test("does not replace a path created after a missing snapshot", async () => {

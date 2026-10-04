@@ -21,7 +21,7 @@ This repository contains Safe Code, a VS Code extension that detects suspicious 
 - `src/rules.ts` defines secret detection regex rules.
 - `src/ignoreCore.ts` defines shared ignore identities and validates project ignore configuration.
 - `src/ignoreStore.ts` stores local ignored warnings in VS Code `workspaceState`.
-- `src/projectIgnoreStore.ts` loads and updates shared `.safe-code.json` ignores.
+- `src/projectIgnoreStore.ts` loads and updates shared `.vscode/.safe-code.json` ignores.
 - `docs/` contains the documentation index.
 - `docs/dev/` contains developer-facing architecture, workflow, and detection rule documentation.
 
