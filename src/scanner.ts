@@ -65,7 +65,7 @@ export function scanDocument(
     return { status: "byte-budget-exhausted", byteLength, findings: [] };
   }
 
-  const findings = scanText(text, { minimumSecretLength: options.minimumSecretLength }).map((finding) => {
+  const findings = scanText(text, { minimumSecretLength: options.minimumSecretLength, fileName: document.fileName }).map((finding) => {
     return {
       ruleId: finding.ruleId,
       ruleName: finding.ruleName,

@@ -3,6 +3,7 @@ import { secretRules, SecretRule, SecretRuleSeverity } from "./rules";
 
 export type CoreScannerOptions = {
   minimumSecretLength: number;
+  fileName: string;
 };
 
 export type OffsetSecretFinding = {
@@ -112,10 +113,19 @@ export function scanText(text: string, options: CoreScannerOptions): OffsetSecre
   const findingsByRange = new Map<string, OffsetSecretFinding>();
 
   for (const rule of secretRules) {
+    if (rule.id === "env-secret-assignment" && !isEnvironmentFile(options.fileName)) {
+      continue;
+    }
+
     rule.regex.lastIndex = 0;
 
     for (const match of text.matchAll(rule.regex)) {
       if (match.index === undefined) {
+        continue;
+      }
+
+      // Backticks with an unescaped interpolation are expressions, not literal credentials.
+      if (rule.id === "generic-secret-assignment" && match[2] === "`" && /(?:^|[^\\])(?:\\\\)*\$\{/.test(match[3])) {
         continue;
       }
 
@@ -147,9 +157,13 @@ export function scanText(text: string, options: CoreScannerOptions): OffsetSecre
   return [...findingsByRange.values()].sort((left, right) => left.startOffset - right.startOffset);
 }
 
+function isEnvironmentFile(fileName: string): boolean {
+  const baseName = path.posix.basename(fileName.replace(/\\/g, "/")).toLowerCase();
+  return baseName === ".env" || baseName.startsWith(".env.");
+}
+
 function isSupportedFile(fileName: string): boolean {
-  const baseName = path.basename(fileName).toLowerCase();
-  if (baseName === ".env" || baseName.startsWith(".env.")) {
+  if (isEnvironmentFile(fileName)) {
     return true;
   }
 
