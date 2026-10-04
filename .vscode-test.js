@@ -4,7 +4,7 @@ module.exports = defineConfig({
   label: "integration",
   files: ".test-out/test/integration/**/*.test.js",
   version: "1.90.0",
-  workspaceFolder: "test/fixtures/workspace",
+  workspaceFolder: "test/fixtures/integration.code-workspace",
   launchArgs: ["--disable-extensions"],
   mocha: {
     ui: "tdd",

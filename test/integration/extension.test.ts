@@ -676,17 +676,11 @@ suite("Safe Code extension", () => {
   });
 
   test("ignores an exact rule across files, pending scans, future edits, and only one workspace root", async () => {
-    const secondRootPath = await fs.mkdtemp(path.join(os.tmpdir(), "safe-code-second-root-"));
-    const secondRoot = vscode.Uri.file(secondRootPath);
+    const secondRoot = vscode.workspace.workspaceFolders?.[1]?.uri;
+    assert.ok(secondRoot, "The integration fixture must contain a second workspace root");
     const otherUri = vscode.Uri.joinPath(secondRoot, "other.ts");
     const source = 'const apiKey = "project-wide-alpha-secret";';
-    await fs.writeFile(otherUri.fsPath, source);
-    const changed = new Promise<void>((resolve) => {
-      const subscription = vscode.workspace.onDidChangeWorkspaceFolders(() => { subscription.dispose(); resolve(); });
-    });
-    assert.ok(vscode.workspace.updateWorkspaceFolders(vscode.workspace.workspaceFolders!.length, 0,
-      { uri: secondRoot, name: "other-project" }));
-    await changed;
+    await vscode.workspace.fs.writeFile(otherUri, Buffer.from(source));
     try {
       const first = await createWorkspaceFile("rule-wide-first.ts", source + '\nconst token = "project-wide-beta-secret";');
       const second = await createWorkspaceFile("rule-wide-second.ts", 'const clientSecret = "project-wide-gamma-secret";\n-----BEGIN PRIVATE KEY-----');
@@ -727,13 +721,7 @@ suite("Safe Code extension", () => {
         ignoredWarnings: [], ignoredRules: [] })));
       await eventually(() => getSafeCodeDiagnostics(second), (items) => items.length === 2);
     } finally {
-      const index = vscode.workspace.workspaceFolders!.findIndex((folder) => folder.uri.toString() === secondRoot.toString());
-      const removed = new Promise<void>((resolve) => {
-        const subscription = vscode.workspace.onDidChangeWorkspaceFolders(() => { subscription.dispose(); resolve(); });
-      });
-      vscode.workspace.updateWorkspaceFolders(index, 1);
-      await removed;
-      await fs.rm(secondRootPath, { recursive: true, force: true });
+      await deleteIfExists(otherUri);
     }
   });
 
