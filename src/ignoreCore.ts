@@ -9,6 +9,10 @@ export type IgnoredWarning = {
 export type ProjectIgnoreConfig = {
   version: 1;
   ignoredWarnings: IgnoredWarning[];
+} | {
+  version: 2;
+  ignoredWarnings: IgnoredWarning[];
+  ignoredRules: string[];
 };
 
 export class ProjectIgnoreConfigError extends Error {
@@ -85,9 +89,13 @@ export function parseProjectIgnoreConfig(content: string): ProjectIgnoreConfig {
   }
 
   const config = parsed as Record<string, unknown>;
-  assertOnlyKeys(config, ["version", "ignoredWarnings"], "project ignore configuration");
-  if (config.version !== 1) {
-    throw new ProjectIgnoreConfigError('The project ignore configuration must contain "version": 1.');
+  assertOnlyKeys(
+    config,
+    config.version === 2 ? ["version", "ignoredWarnings", "ignoredRules"] : ["version", "ignoredWarnings"],
+    "project ignore configuration"
+  );
+  if (config.version !== 1 && config.version !== 2) {
+    throw new ProjectIgnoreConfigError('The project ignore configuration must contain "version": 1 or 2.');
   }
   if (!Array.isArray(config.ignoredWarnings)) {
     throw new ProjectIgnoreConfigError('The project ignore configuration must contain an "ignoredWarnings" array.');
@@ -120,6 +128,17 @@ export function parseProjectIgnoreConfig(content: string): ProjectIgnoreConfig {
     }
   }
 
+  if (config.version === 2) {
+    if (
+      !Array.isArray(config.ignoredRules) ||
+      config.ignoredRules.some((rule) => typeof rule !== "string" || rule.trim().length === 0)
+    ) {
+      throw new ProjectIgnoreConfigError(
+        'The project ignore configuration must contain an "ignoredRules" array of non-empty rule IDs.'
+      );
+    }
+    return { version: 2, ignoredWarnings, ignoredRules: [...new Set(config.ignoredRules as string[])] };
+  }
   return { version: 1, ignoredWarnings };
 }
 

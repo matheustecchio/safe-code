@@ -1,12 +1,12 @@
 import * as vscode from "vscode";
 import {
   createIgnoredWarning,
-  IgnoredWarning,
+  ProjectIgnoreConfig,
   matchesIgnoredWarning,
   normalizeProjectFilePath
 } from "./ignoreCore";
 import {
-  addProjectIgnoredWarning,
+  addProjectIgnoredRule,
   getProjectIgnoreFileErrorMessage,
   normalizeProjectIgnoreFileError,
   projectIgnoreConfigFileName,
@@ -16,7 +16,7 @@ import {
 export { getProjectIgnoreFileErrorMessage, projectIgnoreConfigFileName } from "./projectIgnoreFile";
 
 export class ProjectIgnoreStore {
-  private readonly ignoredWarningsByWorkspace = new Map<string, IgnoredWarning[]>();
+  private readonly configsByWorkspace = new Map<string, ProjectIgnoreConfig>();
   private readonly lastErrorByWorkspace = new Map<string, string>();
   private readonly operationTailsByWorkspace = new Map<string, Promise<void>>();
 
@@ -24,9 +24,9 @@ export class ProjectIgnoreStore {
 
   public async reloadAll(): Promise<void> {
     const currentWorkspaceKeys = new Set((vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString()));
-    for (const workspaceKey of this.ignoredWarningsByWorkspace.keys()) {
+    for (const workspaceKey of this.configsByWorkspace.keys()) {
       if (!currentWorkspaceKeys.has(workspaceKey)) {
-        this.ignoredWarningsByWorkspace.delete(workspaceKey);
+        this.configsByWorkspace.delete(workspaceKey);
       }
     }
     for (const workspaceKey of this.lastErrorByWorkspace.keys()) {
@@ -52,9 +52,15 @@ export class ProjectIgnoreStore {
       return false;
     }
 
+    const config = this.configsByWorkspace.get(workspaceFolder.uri.toString());
+    if (!config) {
+      return false;
+    }
+    if (config.version === 2 && config.ignoredRules.includes(ruleId)) {
+      return true;
+    }
     const warning = createIgnoredWarning(getProjectFilePath(uri), lineText, ruleId);
-    const ignoredWarnings = this.ignoredWarningsByWorkspace.get(workspaceFolder.uri.toString()) ?? [];
-    return ignoredWarnings.some((candidate) => matchesIgnoredWarning(candidate, warning));
+    return config.ignoredWarnings.some((candidate) => matchesIgnoredWarning(candidate, warning));
   }
 
   public isConfigUri(uri: vscode.Uri): boolean {
@@ -66,7 +72,7 @@ export class ProjectIgnoreStore {
     return uri.toString() === getConfigUri(workspaceFolder).toString();
   }
 
-  public async add(uri: vscode.Uri, lineText: string, ruleId: string): Promise<boolean> {
+  public async add(uri: vscode.Uri, ruleId: string): Promise<boolean> {
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
     if (!workspaceFolder) {
       throw new Error("The warning is not inside an open workspace folder.");
@@ -75,13 +81,12 @@ export class ProjectIgnoreStore {
     const workspaceKey = workspaceFolder.uri.toString();
     return await this.runSerialized(workspaceKey, async () => {
       try {
-        const warning = createIgnoredWarning(getProjectFilePath(uri), lineText, ruleId);
-        const update = await addProjectIgnoredWarning(getConfigPath(workspaceFolder, "write-failed"), warning);
-        this.ignoredWarningsByWorkspace.set(workspaceKey, update.config.ignoredWarnings);
+        const update = await addProjectIgnoredRule(getConfigPath(workspaceFolder, "write-failed"), ruleId);
+        this.configsByWorkspace.set(workspaceKey, update.config);
         this.lastErrorByWorkspace.delete(workspaceKey);
         return update.changed;
       } catch (error) {
-        this.ignoredWarningsByWorkspace.delete(workspaceKey);
+        this.configsByWorkspace.delete(workspaceKey);
         throw normalizeProjectIgnoreFileError(error, "write-failed");
       }
     });
@@ -92,10 +97,10 @@ export class ProjectIgnoreStore {
     await this.runSerialized(workspaceKey, async () => {
       try {
         const config = await readProjectIgnoreConfigFile(getConfigPath(workspaceFolder, "read-failed"));
-        this.ignoredWarningsByWorkspace.set(workspaceKey, config.ignoredWarnings);
+        this.configsByWorkspace.set(workspaceKey, config);
         this.lastErrorByWorkspace.delete(workspaceKey);
       } catch (error) {
-        this.ignoredWarningsByWorkspace.delete(workspaceKey);
+        this.configsByWorkspace.delete(workspaceKey);
         const detail = getProjectIgnoreFileErrorMessage(error, "read-failed");
         const message = `Safe Code ignored project configuration. ${detail}`;
         if (this.lastErrorByWorkspace.get(workspaceKey) !== message) {
