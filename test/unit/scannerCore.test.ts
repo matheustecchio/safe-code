@@ -161,22 +161,24 @@ suite("scanner core", () => {
     assert.strictEqual(shouldScanFile("notes.txt", "notes.txt", defaultIgnoredPaths), false);
   });
 
-  test("ignores only directories named exactly .env at any workspace depth", () => {
-    for (const relativePath of [
-      ".env/secret.ts",
-      "nested/.env/secret.ts",
-      "nested\\.env\\secret.ts"
-    ]) {
-      assert.strictEqual(shouldScanFile("secret.ts", relativePath, defaultIgnoredPaths), false, relativePath);
+  test("ignores only exact environment directory names at any workspace depth", () => {
+    for (const directory of [".env", ".venv", "venv", ".environment"]) {
+      for (const relativePath of [
+        `${directory}/secret.ts`,
+        `nested/${directory}/secret.ts`,
+        `nested/${directory}/lib64/python3.12/site-packages/twisted/internet/endpoints.py`
+      ]) {
+        for (const normalizedPath of [relativePath, relativePath.replace(/\//g, "\\")]) {
+          assert.strictEqual(shouldScanFile("secret.ts", normalizedPath, defaultIgnoredPaths), false, normalizedPath);
+        }
+      }
     }
 
-    for (const relativePath of [
-      ".env-config.ts",
-      ".env.local/secret.ts",
-      "nested/.env-config/secret.ts",
-      "nested/my.env/secret.ts"
-    ]) {
-      assert.strictEqual(shouldScanFile("secret.ts", relativePath, defaultIgnoredPaths), true, relativePath);
+    for (const directory of [".env.local", ".env-config", "my.env", ".venv-config", "my.venv", ".environment-config", "env", "environment"]) {
+      for (const relativePath of [`${directory}/secret.ts`, `nested/${directory}/secret.ts`]) {
+        assert.strictEqual(shouldScanFile("secret.ts", relativePath, defaultIgnoredPaths), true, relativePath);
+        assert.strictEqual(shouldScanFile("secret.ts", relativePath.replace(/\//g, "\\"), defaultIgnoredPaths), true, relativePath);
+      }
     }
   });
 
