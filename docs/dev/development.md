@@ -344,7 +344,7 @@ Current settings are:
 - `safeCode.maxWorkspaceScanBytes` controls the aggregate UTF-8 byte budget for a full scan. It defaults to 104,857,600 (100 MiB).
 - `safeCode.ignoredPaths` controls workspace-relative glob patterns that Safe Code skips.
 
-The mandatory `**/.env/**` exclusion applies after user configuration is merged. It excludes directories named exactly `.env` at the workspace root or below it across discovery, watcher events, open-document scans, and stale-diagnostic cleanup. It does not exclude files named `.env`, `.env.local`, other `.env.*` files, or names such as `.env-config.ts`.
+The mandatory `**/.env/**`, `**/.venv/**`, `**/venv/**`, and `**/.environment/**` exclusions apply after user configuration is merged. They exclude directories named exactly `.env`, `.venv`, `venv`, and `.environment` at the workspace root or below it across discovery, watcher events, open-document scans, and stale-diagnostic cleanup. They do not exclude files named `.env`, `.env.local`, other `.env.*` files, or names such as `.env-config.ts`, `.venv-config`, `my.venv`, `.environment-config`, `env`, and `environment`. Empty or replacement `safeCode.ignoredPaths` arrays retain these defaults; custom patterns are additive. General Git ignore filtering is not implemented, so Git-ignored dotenv files remain eligible. Git checks in the opt-in environment migration protect writes and do not determine scanner eligibility.
 
 The three resource settings accept positive integers. Invalid runtime values fall back to their defaults. Exact limits are inclusive.
 
