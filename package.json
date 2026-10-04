@@ -51,7 +51,7 @@
     },
     "jsonValidation": [
       {
-        "fileMatch": "**/.safe-code.json",
+        "fileMatch": "**/.vscode/.safe-code.json",
         "url": "./schemas/safe-code.schema.json"
       }
     ],

@@ -42,11 +42,12 @@ suite("Safe Code extension", () => {
     assert.ok(workspaceFolder, "The integration fixture workspace must be open");
     workspaceRoot = workspaceFolder.uri;
     runtimeDirectory = vscode.Uri.joinPath(workspaceRoot, runtimeDirectoryName);
-    projectConfigUri = vscode.Uri.joinPath(workspaceRoot, ".safe-code.json");
+    projectConfigUri = vscode.Uri.joinPath(workspaceRoot, ".vscode", ".safe-code.json");
     environmentUri = vscode.Uri.joinPath(workspaceRoot, ".env");
     environmentExampleUri = vscode.Uri.joinPath(workspaceRoot, ".env.example");
     gitIgnoreUri = vscode.Uri.joinPath(workspaceRoot, ".gitignore");
     await vscode.workspace.fs.createDirectory(runtimeDirectory);
+    await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(workspaceRoot, ".vscode"));
 
     const extension = vscode.extensions.getExtension(extensionId);
     assert.ok(extension, `Extension ${extensionId} was not found`);
@@ -589,6 +590,24 @@ suite("Safe Code extension", () => {
     assert.deepStrictEqual(getSafeCodeDiagnostics(uri), []);
   });
 
+  test("does not load or update legacy root project configuration", async () => {
+    const lineText = 'const apiKey = "legacy-project-secret";';
+    const uri = await createWorkspaceFile("legacy-ignore.ts", lineText);
+    const legacyUri = vscode.Uri.joinPath(workspaceRoot, ".safe-code.json");
+    createdWorkspaceFiles.push(legacyUri);
+    const bytes = Buffer.from(JSON.stringify({ version: 1, ignoredWarnings: [{
+      filePath: getWorkspaceRelativePath(uri), lineHash: hashLineText(lineText),
+      ruleId: "generic-secret-assignment"
+    }] }));
+    await vscode.workspace.fs.writeFile(legacyUri, bytes);
+    await vscode.commands.executeCommand("safeCode.scanWorkspace");
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+    await vscode.commands.executeCommand("safeCode.ignoreWarningForProject", uri, 0, "generic-secret-assignment");
+    assert.deepStrictEqual(await vscode.workspace.fs.readFile(legacyUri), bytes);
+    assert.strictEqual(JSON.parse(await readWorkspaceText(projectConfigUri)).ignoredWarnings[0].filePath,
+      getWorkspaceRelativePath(uri));
+  });
+
   test("reloads project ignores when configuration is created and deleted", async () => {
     const lineText = 'const apiKey = "shared-project-secret";';
     const uri = await createWorkspaceFile("shared-ignore.ts", lineText);
@@ -603,6 +622,11 @@ suite("Safe Code extension", () => {
     ]);
     await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 0);
 
+    await writeProjectConfig([]);
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+    await writeProjectConfig([{ filePath: getWorkspaceRelativePath(uri), lineHash: hashLineText(lineText),
+      ruleId: "generic-secret-assignment" }]);
+    await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 0);
     await deleteIfExists(projectConfigUri);
     await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
   });
