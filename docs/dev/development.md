@@ -136,7 +136,7 @@ safe-code/
 | `src/extension.ts` | Extension entry point. Wires events, diagnostics, commands, settings, and quick fixes. |
 | `src/environmentFixCore.ts` | Parses unambiguous assignments, infers environment names, and safely updates environment-file text without importing VS Code. |
 | `src/environmentMigrationCore.ts` | Serializes migrations per workspace, checks cancellation, journals mutations, and coordinates reverse-order rollback without importing VS Code. |
-| `src/environmentStore.ts` | Takes exact no-follow snapshots, verifies Git protection, and conditionally updates or restores `.gitignore`, `.env.example`, and `.env`. |
+| `src/environmentStore.ts` | Takes exact no-follow snapshots, verifies Git protection, and conditionally updates or restores `.gitignore` and `.env`. |
 | `src/ignoreCore.ts` | Contains VS Code-independent ignore identity, validation, parsing, and serialization logic. |
 | `src/projectIgnoreFile.ts` | Performs no-follow reads, stable snapshot validation, and atomic Node filesystem updates for `.vscode/.safe-code.json`. |
 | `src/scanner.ts` | Decides which documents can be scanned and turns regex matches into `SecretFinding` objects. |
@@ -282,14 +282,15 @@ At execution time the command reopens and revalidates the source so a stale diag
 
 - `.gitignore` receives `/.safe-code-tmp-*` followed by a final exact `/.env` rule before any secret is written.
 - `.env` receives `CLIENT_SECRET="..."`; an existing different value causes the operation to stop.
-- `.env.example` receives only the empty `CLIENT_SECRET=` entry.
 - The source literal, including its quotes, becomes `process.env.CLIENT_SECRET`.
+
+The quick fix does not read, create, or modify `.env.example`; teams can maintain that optional template themselves.
 
 The command is cancellable and `EnvironmentMigrationCoordinator` serializes operations that target the same canonical workspace. Once inside that lock, the source version, diagnostic range, assignment, workspace-root identity, protected editor buffers, and exact target snapshots are revalidated before every mutation. The file store accepts only absent or regular UTF-8 targets, reads existing files without following symbolic links, refuses concurrent identity or byte changes, and prepares complete same-directory replacements before using an atomic rename for existing targets or exclusive hard-link creation for absent targets. New and updated `.env` files use mode `0600` on platforms that expose POSIX permissions.
 
 Git inspection fails closed when Git is unavailable or returns an ambiguous result. A confirmed non-repository workspace is allowed. Inside a repository, the command verifies that `.env` is untracked, writes the final root ignore rules, then uses `git check-ignore --no-index` to prove that the effective rules protect both `.env` and the exclusive mode-`0600` sibling temporary used for atomic replacement. It repeats these checks immediately before the secret write and again before commit.
 
-Mutations run in the order `.gitignore`, `.env.example`, `.env`, then source. Each completed mutation records the exact state that it owns. Cancellation, a rejected source edit, or any later failure restores owned changes in reverse order after revalidating each state; detected concurrent edits stop recovery rather than being overwritten. If safe rollback of the source or `.env` becomes impossible, the transaction deliberately retains the ignored environment file and reports a redacted manual-recovery message instead of risking secret exposure or data loss. Error messages are selected from typed, fixed text and never include source lines, file contents, paths, Git output, or secret values.
+Mutations run in the order `.gitignore`, `.env`, then source. Each completed mutation records the exact state that it owns. Cancellation, a rejected source edit, or any later failure restores owned changes in reverse order after revalidating each state; detected concurrent edits stop recovery rather than being overwritten. If safe rollback of the source or `.env` becomes impossible, the transaction deliberately retains the ignored environment file and reports a redacted manual-recovery message instead of risking secret exposure or data loss. Error messages are selected from typed, fixed text and never include source lines, file contents, paths, Git output, or secret values.
 
 ## Ignore Storage
 

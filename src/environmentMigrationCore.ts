@@ -33,7 +33,7 @@ export class EnvironmentMigrationError extends Error {
   }
 }
 
-export type EnvironmentMigrationStep = "gitignore" | "example" | "environment" | "source";
+export type EnvironmentMigrationStep = "gitignore" | "environment" | "source";
 
 export type EnvironmentMigrationMutation = {
   step: EnvironmentMigrationStep;
@@ -116,7 +116,7 @@ export class EnvironmentMigrationCoordinator {
       await transaction.prepare();
       throwIfCancelled(cancellation);
 
-      for (const step of ["gitignore", "example", "environment", "source"] as const) {
+      for (const step of ["gitignore", "environment", "source"] as const) {
         await transaction.beforeStep(step);
         throwIfCancelled(cancellation);
         try {

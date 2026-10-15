@@ -907,9 +907,42 @@ suite("Safe Code extension", () => {
 
     assert.strictEqual(document.getText(), "export const clientSecret = process.env.CLIENT_SECRET;");
     assert.strictEqual(await readWorkspaceText(environmentUri), `CLIENT_SECRET=${JSON.stringify(secretValue)}\n`);
-    assert.strictEqual(await readWorkspaceText(environmentExampleUri), "CLIENT_SECRET=\n");
+    assert.strictEqual(await workspaceFileExists(environmentExampleUri), false);
     assert.strictEqual(await readWorkspaceText(gitIgnoreUri), "/.safe-code-tmp-*\n/.env\n");
-    assert.ok(!(await readWorkspaceText(environmentExampleUri)).includes(secretValue));
+  });
+
+  test("leaves an existing dirty .env.example untouched", async () => {
+    const exampleOnDisk = "EXISTING=\n";
+    await vscode.workspace.fs.writeFile(environmentExampleUri, Buffer.from(exampleOnDisk));
+    const exampleDocument = await vscode.workspace.openTextDocument(environmentExampleUri);
+    const exampleEditor = await vscode.window.showTextDocument(exampleDocument);
+    assert.strictEqual(await exampleEditor.edit((builder) => {
+      builder.insert(new vscode.Position(0, 0), "# unsaved note\n");
+    }), true);
+
+    try {
+      const uri = await createWorkspaceFile("existing-example-fix.ts", 'const clientSecret = "example-migration-value";');
+      const document = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(document);
+      await vscode.commands.executeCommand("safeCode.scanOpenFiles");
+      const diagnostics = await eventually(() => getSafeCodeDiagnostics(uri), (items) => items.length === 1);
+      const actions = await requestCodeActions(uri, diagnostics[0].range);
+      const action = actions.find((candidate): candidate is vscode.CodeAction =>
+        candidate instanceof vscode.CodeAction && candidate.title === "Safe Code: Move value to .env"
+      );
+      assert.ok(action?.command, "The environment quick fix was not returned");
+
+      await vscode.commands.executeCommand(action.command.command, ...(action.command.arguments ?? []));
+
+      assert.strictEqual(document.getText(), "const clientSecret = process.env.CLIENT_SECRET;");
+      assert.strictEqual(await readWorkspaceText(environmentExampleUri), exampleOnDisk);
+      assert.strictEqual(exampleDocument.isDirty, true);
+    } finally {
+      const edit = new vscode.WorkspaceEdit();
+      edit.delete(environmentExampleUri, new vscode.Range(0, 0, 1, 0));
+      assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
+      assert.strictEqual(await exampleDocument.save(), true);
+    }
   });
 
   test("rejects a stale environment action before changing any target", async () => {
@@ -982,7 +1015,7 @@ suite("Safe Code extension", () => {
     const environmentText = await readWorkspaceText(environmentUri);
     assert.ok(environmentText.includes(`FIRST_TOKEN=${JSON.stringify(firstSecret)}\n`));
     assert.ok(environmentText.includes(`SECOND_TOKEN=${JSON.stringify(secondSecret)}\n`));
-    assert.strictEqual(await readWorkspaceText(environmentExampleUri), "FIRST_TOKEN=\nSECOND_TOKEN=\n");
+    assert.strictEqual(await workspaceFileExists(environmentExampleUri), false);
     assert.strictEqual(await readWorkspaceText(gitIgnoreUri), "/.safe-code-tmp-*\n/.env\n");
   });
 

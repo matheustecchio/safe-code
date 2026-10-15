@@ -1267,7 +1267,7 @@ function createSourceMutation(source: PreparedSourceMigration): EnvironmentMigra
 
 function assertEnvironmentTargetsAreNotDirty(workspaceFolder: vscode.WorkspaceFolder): void {
   const protectedUris = new Set(
-    [".gitignore", ".env", ".env.example"].map((name) => vscode.Uri.joinPath(workspaceFolder.uri, name).toString())
+    [".gitignore", ".env"].map((name) => vscode.Uri.joinPath(workspaceFolder.uri, name).toString())
   );
   if (vscode.workspace.textDocuments.some((document) => document.isDirty && protectedUris.has(document.uri.toString()))) {
     throw new EnvironmentMigrationError("unsafe-target");

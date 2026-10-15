@@ -20,7 +20,7 @@ Run **Safe Code: Scan Workspace** to check supported open and unopened files acr
 
 ### Move a value to `.env`
 
-For a supported simple JavaScript or TypeScript assignment, choose **Move value to .env**. Safe Code replaces the literal with an environment lookup, writes the value to the workspace root `.env`, adds an empty key to `.env.example`, and checks that `.env` is ignored by Git before writing it.
+For a supported simple JavaScript or TypeScript assignment, choose **Move value to .env**. Safe Code replaces the literal with an environment lookup, writes the value to the workspace root `.env`, and updates `.gitignore` to protect that file. It leaves `.env.example` untouched.
 
 ```ts
 // Before: fictional example value

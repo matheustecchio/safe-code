@@ -96,18 +96,6 @@ export function upsertEnvironmentValue(
   return appendLine(content, line);
 }
 
-export function upsertEnvironmentExample(content: string, environmentVariableName: string): string {
-  const existingLines = findEnvironmentVariableLines(content, environmentVariableName);
-  if (existingLines.length > 1) {
-    throw new EnvironmentVariableConflictError(environmentVariableName);
-  }
-  if (existingLines.length === 1) {
-    return content;
-  }
-
-  return appendLine(content, `${environmentVariableName}=`);
-}
-
 export function ensureEnvironmentFileIgnored(content: string): string {
   const effectiveRules = content
     .split(/\r?\n/)
