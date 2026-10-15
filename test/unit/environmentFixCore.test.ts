@@ -5,7 +5,6 @@ import {
   EnvironmentVariableConflictError,
   inferEnvironmentVariableName,
   isSupportedEnvironmentFixFile,
-  upsertEnvironmentExample,
   upsertEnvironmentValue
 } from "../../src/environmentFixCore";
 
@@ -78,14 +77,12 @@ suite("environment fix core", () => {
     assert.strictEqual(isSupportedEnvironmentFixFile(".env"), false);
   });
 
-  test("updates environment files without exposing values in the example", () => {
+  test("updates environment values", () => {
     assert.strictEqual(upsertEnvironmentValue("", "API_KEY", "secret value #1"), 'API_KEY="secret value #1"\n');
     assert.strictEqual(
       upsertEnvironmentValue('EXISTING="value"\r\n', "API_KEY", "secret-value"),
       'EXISTING="value"\r\nAPI_KEY="secret-value"\r\n'
     );
-    assert.strictEqual(upsertEnvironmentExample("EXISTING=\n", "API_KEY"), "EXISTING=\nAPI_KEY=\n");
-    assert.strictEqual(upsertEnvironmentExample("API_KEY=placeholder\n", "API_KEY"), "API_KEY=placeholder\n");
   });
 
   test("does not overwrite conflicting environment values", () => {
@@ -96,10 +93,6 @@ suite("environment fix core", () => {
     assert.strictEqual(
       upsertEnvironmentValue('API_KEY="same-secret"\n', "API_KEY", "same-secret"),
       'API_KEY="same-secret"\n'
-    );
-    assert.throws(
-      () => upsertEnvironmentExample("API_KEY=\nAPI_KEY=placeholder\n", "API_KEY"),
-      EnvironmentVariableConflictError
     );
   });
 

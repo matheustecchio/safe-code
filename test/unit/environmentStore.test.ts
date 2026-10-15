@@ -33,10 +33,9 @@ import {
 type EnvironmentFileStep = Exclude<EnvironmentMigrationStep, "source">;
 
 const execFileAsync = promisify(execFile);
-const environmentFiles = [".gitignore", ".env.example", ".env"] as const;
+const environmentFiles = [".gitignore", ".env"] as const;
 const fileForStep: Record<EnvironmentFileStep, (typeof environmentFiles)[number]> = {
   gitignore: ".gitignore",
-  example: ".env.example",
   environment: ".env"
 };
 const redactionSentinel = ["synthetic", "private", "test", "value"].join("-");
@@ -48,22 +47,22 @@ suite("environment store", () => {
       await applyEnvironmentFiles(store, "API_KEY", redactionSentinel);
 
       await assertFileBytes(workspaceRoot, ".gitignore", Buffer.from("/.safe-code-tmp-*\n/.env\n"));
-      await assertFileBytes(workspaceRoot, ".env.example", Buffer.from("API_KEY=\n"));
+      await assertMissing(workspaceRoot, ".env.example");
       await assertFileBytes(
         workspaceRoot,
         ".env",
         Buffer.from(`API_KEY=${JSON.stringify(redactionSentinel)}\n`)
       );
       await assertFileMode(workspaceRoot, ".gitignore", 0o644);
-      await assertFileMode(workspaceRoot, ".env.example", 0o644);
       await assertFileMode(workspaceRoot, ".env", 0o600);
     });
   });
 
-  test("updates exact bytes, preserves public-file modes, and restricts .env", async () => {
+  test("updates owned files while leaving an existing .env.example unchanged", async () => {
     await withTemporaryWorkspace(async (workspaceRoot) => {
       await writeFileWithMode(workspaceRoot, ".gitignore", Buffer.from("node_modules/\r\n"), 0o640);
-      await writeFileWithMode(workspaceRoot, ".env.example", Buffer.from("EXISTING=\r\n"), 0o604);
+      const existingExample = Buffer.from("EXISTING=\r\n");
+      await writeFileWithMode(workspaceRoot, ".env.example", existingExample, 0o604);
       await writeFileWithMode(
         workspaceRoot,
         ".env",
@@ -79,11 +78,7 @@ suite("environment store", () => {
         ".gitignore",
         Buffer.from("node_modules/\r\n/.safe-code-tmp-*\r\n/.env\r\n")
       );
-      await assertFileBytes(
-        workspaceRoot,
-        ".env.example",
-        Buffer.from("EXISTING=\r\nAPI_KEY=\r\n")
-      );
+      await assertFileBytes(workspaceRoot, ".env.example", existingExample);
       await assertFileBytes(
         workspaceRoot,
         ".env",
@@ -94,6 +89,39 @@ suite("environment store", () => {
       await assertFileMode(workspaceRoot, ".env", 0o600);
     });
   });
+
+  for (const exampleKind of ["symbolic link", "directory", "invalid UTF-8"] as const) {
+    test(`ignores an existing .env.example ${exampleKind}`, async () => {
+      await withTemporaryWorkspace(async (workspaceRoot, temporaryRoot) => {
+        const examplePath = path.join(workspaceRoot, ".env.example");
+        const originalBytes = Buffer.from([0xc3, 0x28]);
+        if (exampleKind === "symbolic link") {
+          const target = path.join(temporaryRoot, "example-target");
+          await writeFile(target, originalBytes);
+          await symlink(target, examplePath);
+        } else if (exampleKind === "directory") {
+          await mkdir(examplePath);
+        } else {
+          await writeFile(examplePath, originalBytes);
+        }
+
+        await applyEnvironmentFiles(new EnvironmentStore(workspaceRoot), "API_KEY", redactionSentinel);
+
+        const exampleStat = await lstat(examplePath);
+        if (exampleKind === "symbolic link") {
+          assert.strictEqual(exampleStat.isSymbolicLink(), true);
+          await assertFileBytes(workspaceRoot, ".env.example", originalBytes);
+        } else if (exampleKind === "directory") {
+          assert.strictEqual(exampleStat.isDirectory(), true);
+          assert.deepStrictEqual(await readdir(examplePath), []);
+        } else {
+          await assertFileBytes(workspaceRoot, ".env.example", originalBytes);
+        }
+        await assertFileBytes(workspaceRoot, ".gitignore", Buffer.from("/.safe-code-tmp-*\n/.env\n"));
+        await assertFileBytes(workspaceRoot, ".env", Buffer.from(`API_KEY=${JSON.stringify(redactionSentinel)}\n`));
+      });
+    });
+  }
 
   test("rejects a source symbolic link without changing the external target", async () => {
     await withTemporaryWorkspace(async (workspaceRoot, temporaryRoot) => {
@@ -538,7 +566,7 @@ suite("environment store", () => {
     });
   });
 
-  for (const step of ["gitignore", "example", "environment"] as const) {
+  for (const step of ["gitignore", "environment"] as const) {
     test(`detects a concurrent ${step} target change before writing`, async () => {
       await withTemporaryWorkspace(async (workspaceRoot) => {
         const foreignBytes = Buffer.from(`foreign-${step}-change\n`);
@@ -565,8 +593,10 @@ suite("environment store", () => {
     test(`rolls back exact file state after a ${step} post-write failure`, async () => {
       await withTemporaryWorkspace(async (workspaceRoot) => {
         const originalGitignore = Buffer.from("dist/\r\n");
+        const originalExample = Buffer.from("EXISTING=\r\n");
         const originalEnvironment = Buffer.from('EXISTING="placeholder"\r\n');
         await writeFileWithMode(workspaceRoot, ".gitignore", originalGitignore, 0o640);
+        await writeFileWithMode(workspaceRoot, ".env.example", originalExample, 0o604);
         await writeFileWithMode(workspaceRoot, ".env", originalEnvironment, 0o600);
 
         const store = new EnvironmentStore(workspaceRoot, {
@@ -587,7 +617,8 @@ suite("environment store", () => {
         assertSafeError(error);
         await assertFileBytes(workspaceRoot, ".gitignore", originalGitignore);
         await assertFileMode(workspaceRoot, ".gitignore", 0o640);
-        await assertMissing(workspaceRoot, ".env.example");
+        await assertFileBytes(workspaceRoot, ".env.example", originalExample);
+        await assertFileMode(workspaceRoot, ".env.example", 0o604);
         await assertFileBytes(workspaceRoot, ".env", originalEnvironment);
         await assertFileMode(workspaceRoot, ".env", 0o600);
       });
@@ -616,7 +647,7 @@ async function applyEnvironmentFiles(
   secretValue: string
 ): Promise<void> {
   await store.prepare(environmentVariableName, secretValue);
-  for (const step of ["gitignore", "example", "environment"] as const) {
+  for (const step of ["gitignore", "environment"] as const) {
     await store.beforeStep(step);
     await store.apply(step);
   }

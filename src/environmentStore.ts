@@ -6,7 +6,6 @@ import * as path from "path";
 import {
   ensureEnvironmentFileIgnored,
   EnvironmentVariableConflictError,
-  upsertEnvironmentExample,
   upsertEnvironmentValue
 } from "./environmentFixCore";
 import {
@@ -112,7 +111,6 @@ export class EnvironmentStore {
     this.gitRepository = await inspectGitRepository(this.workspaceRoot);
 
     const gitignore = await readExactTextFile(path.join(this.workspaceRoot, ".gitignore"));
-    const example = await readExactTextFile(path.join(this.workspaceRoot, ".env.example"));
     const environment = await readExactTextFile(path.join(this.workspaceRoot, ".env"));
 
     if (this.gitRepository) {
@@ -120,14 +118,12 @@ export class EnvironmentStore {
     }
 
     let nextEnvironment: string;
-    let nextExample: string;
     try {
       nextEnvironment = upsertEnvironmentValue(
         environment.content,
         environmentVariableName,
         secretValue
       );
-      nextExample = upsertEnvironmentExample(example.content, environmentVariableName);
     } catch (error) {
       if (error instanceof EnvironmentVariableConflictError) {
         throw new EnvironmentMigrationError("conflict", { cause: error });
@@ -139,7 +135,6 @@ export class EnvironmentStore {
 
     this.preparedFiles = {
       gitignore: prepareFile("gitignore", gitignore, nextGitignore),
-      example: prepareFile("example", example, nextExample),
       environment: prepareFile("environment", environment, nextEnvironment)
     };
 

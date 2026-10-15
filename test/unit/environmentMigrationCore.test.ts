@@ -12,7 +12,7 @@ import {
   normalizeEnvironmentMigrationError
 } from "../../src/environmentMigrationCore";
 
-const migrationSteps = ["gitignore", "example", "environment", "source"] as const;
+const migrationSteps = ["gitignore", "environment", "source"] as const;
 
 suite("environment migration core", () => {
   test("runs preparation, mutations, and verification in the required order", async () => {
@@ -25,8 +25,6 @@ suite("environment migration core", () => {
       "prepare",
       "before:gitignore",
       "apply:gitignore",
-      "before:example",
-      "apply:example",
       "before:environment",
       "apply:environment",
       "before:source",
@@ -155,7 +153,7 @@ suite("environment migration core", () => {
       "concurrent-change"
     );
 
-    assert.deepStrictEqual(harness.rollbackCalls, ["source", "environment", "example", "gitignore"]);
+    assert.deepStrictEqual(harness.rollbackCalls, ["source", "environment", "gitignore"]);
     assert.deepStrictEqual([...harness.applied], []);
   });
 
@@ -171,7 +169,7 @@ suite("environment migration core", () => {
       "rollback-failed"
     );
 
-    assert.deepStrictEqual(harness.rollbackCalls, ["source", "example"]);
+    assert.deepStrictEqual(harness.rollbackCalls, ["source"]);
     assert.deepStrictEqual([...harness.applied], ["gitignore", "environment", "source"]);
   });
 
@@ -187,7 +185,7 @@ suite("environment migration core", () => {
       "rollback-failed"
     );
 
-    assert.deepStrictEqual(harness.rollbackCalls, ["source", "environment", "example"]);
+    assert.deepStrictEqual(harness.rollbackCalls, ["source", "environment"]);
     assert.deepStrictEqual([...harness.applied], ["gitignore", "environment"]);
   });
 
