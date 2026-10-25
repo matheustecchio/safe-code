@@ -7,6 +7,7 @@
 AGENT.md
 CLAUDE.md
 docs/**
+!docs/media/safe-code-cover.png
 scripts/**
 test/**
 node_modules/**
