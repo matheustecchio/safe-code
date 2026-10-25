@@ -1,3 +1,5 @@
+![Safe Code detects a hardcoded secret and moves it to an environment variable](./docs/media/safe-code-cover.png)
+
 # Safe Code
 
 **Catch hardcoded secrets while you work in VS Code.**
